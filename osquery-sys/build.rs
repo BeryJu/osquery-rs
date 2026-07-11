@@ -194,26 +194,7 @@ fn ensure_osquery_source(dest: &Path) {
         .arg("1")
         .arg(OSQUERY_REPO_URL)
         .arg(dest);
-    disable_git_autocrlf(&mut clone);
     run(&mut clone, "git clone osquery");
-}
-
-/// Forces `core.autocrlf=false` for a git (or git-spawning) child process via
-/// env vars rather than touching any global/system gitconfig. Windows git
-/// installs commonly default `core.autocrlf=true`; without this, checking
-/// out osquery's tree (top-level clone here, nested submodules via CMake's
-/// own lazy `git submodule` calls during configure) rewrites `\n` to `\r\n`
-/// in vendored headers, which breaks `patch_boost_mpl_enum_constexpr_conversion`'s
-/// exact-byte anchor-text match (and would silently produce a differently
-/// byte-shaped checkout per platform otherwise). `GIT_CONFIG_COUNT`/`_KEY_n`/
-/// `_VALUE_n` (git >= 2.31) override every other config source for any git
-/// invocation that inherits these env vars, including child processes CMake
-/// itself spawns for submodule fetches -- so setting them on the `configure`
-/// `Command` (not just our own explicit `clone`) is what actually matters.
-fn disable_git_autocrlf(cmd: &mut Command) {
-    cmd.env("GIT_CONFIG_COUNT", "1")
-        .env("GIT_CONFIG_KEY_0", "core.autocrlf")
-        .env("GIT_CONFIG_VALUE_0", "false");
 }
 
 /// Applies known local patches to the freshly cloned osquery tree, each
@@ -237,8 +218,19 @@ fn patch_boost_mpl_enum_constexpr_conversion(src_dir: &Path) {
     let path = src_dir.join(
         "libraries/cmake/source/boost/src/libs/mpl/include/boost/mpl/aux_/integral_wrapper.hpp",
     );
+    // Normalize to LF before matching: Windows checkouts of this file can
+    // come back CRLF (git-for-Windows' core.autocrlf default, and/or a
+    // path-specific .gitattributes rule inside Boost's own repo that
+    // overrides a global autocrlf=false override -- tried that override
+    // first, on both the top-level clone and the cmake-configure step that
+    // triggers this nested submodule's checkout, and it did not change the
+    // result) -- neither Clang nor MSVC care about a source file's
+    // line-ending style, so rewriting the whole file to LF-only here has no
+    // effect on compilation and makes the byte-exact anchor match below
+    // robust regardless of which checkout path produced CRLF.
     let contents = fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
+    let contents = contents.replace("\r\n", "\n");
 
     if contents.contains("-Wenum-constexpr-conversion") {
         return; // already patched
@@ -384,11 +376,6 @@ fn configure_and_build(src_dir: &Path, build_dir: &Path) {
         // docs) for the OpenSSL formula's build; also must be on PATH.
     }
 
-    // CMake's configure step is what actually fetches osquery's nested
-    // third-party submodules (boost, thrift, ...) lazily, via its own git
-    // subprocess calls -- these need the same autocrlf override as our own
-    // top-level clone above, or headers land with mismatched line endings.
-    disable_git_autocrlf(&mut configure);
     run(&mut configure, "cmake configure");
 
     // The patched file (a vendored Boost header) lives inside a nested

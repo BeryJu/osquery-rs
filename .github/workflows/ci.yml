@@ -65,10 +65,16 @@ jobs:
           key: osquery-sys-linux-${{ hashFiles('osquery-sys/build.rs') }}
 
       - name: cargo build
-        run: cargo build --workspace
+        # -vv makes Cargo forward build.rs's own captured stdout/stderr live
+        # (plain -v only shows compiler invocation lines, not build-script
+        # output) -- this build spawns cmake/git as child processes with
+        # inherited stdio, so their progress only reaches the Actions log
+        # stream at this verbosity. Without it, a genuinely slow multi-hour
+        # native build and a truly stuck one look identical in the log.
+        run: cargo build --workspace -vv
 
       - name: cargo test (integration)
-        run: cargo test -p osquery --features integration-tests -- --nocapture
+        run: cargo test -p osquery --features integration-tests -vv -- --nocapture
 
   macos:
     name: macOS (aarch64)
@@ -101,10 +107,16 @@ jobs:
           key: osquery-sys-macos-${{ hashFiles('osquery-sys/build.rs') }}
 
       - name: cargo build
-        run: cargo build --workspace
+        # -vv makes Cargo forward build.rs's own captured stdout/stderr live
+        # (plain -v only shows compiler invocation lines, not build-script
+        # output) -- this build spawns cmake/git as child processes with
+        # inherited stdio, so their progress only reaches the Actions log
+        # stream at this verbosity. Without it, a genuinely slow multi-hour
+        # native build and a truly stuck one look identical in the log.
+        run: cargo build --workspace -vv
 
       - name: cargo test (integration)
-        run: cargo test -p osquery --features integration-tests -- --nocapture
+        run: cargo test -p osquery --features integration-tests -vv -- --nocapture
 
   windows:
     name: Windows (x86_64)
@@ -146,7 +158,13 @@ jobs:
           key: osquery-sys-windows-${{ hashFiles('osquery-sys/build.rs') }}
 
       - name: cargo build
-        run: cargo build --workspace
+        # -vv makes Cargo forward build.rs's own captured stdout/stderr live
+        # (plain -v only shows compiler invocation lines, not build-script
+        # output) -- this build spawns cmake/git as child processes with
+        # inherited stdio, so their progress only reaches the Actions log
+        # stream at this verbosity. Without it, a genuinely slow multi-hour
+        # native build and a truly stuck one look identical in the log.
+        run: cargo build --workspace -vv
 
       - name: cargo test (integration)
-        run: cargo test -p osquery --features integration-tests -- --nocapture
+        run: cargo test -p osquery --features integration-tests -vv -- --nocapture
