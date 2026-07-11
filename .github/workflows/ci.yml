@@ -11,7 +11,14 @@ env:
   # num_jobs() -- this overrides its own default cap for CI runners, which
   # generally have more headroom than the Docker Desktop VM that default
   # was tuned for, but keeps it explicit and small enough to be safe).
-  NUM_JOBS: "3"
+  # Lowered from 3 -> 2 after a Linux run went from 0% to 62% in ~10 minutes
+  # (healthy) then produced zero further output for 60+ minutes on a single
+  # rocksdb/sleuthkit translation unit -- a sudden full stop rather than a
+  # gradual slowdown, more consistent with an OOM-killed/hung compiler
+  # process than a merely slow file. Not confirmed as the root cause (no way
+  # to inspect the runner directly), but a reasonable mitigation given this
+  # codebase's own docs already warn about OOM under full parallelism.
+  NUM_JOBS: "2"
 
 jobs:
   linux:
@@ -71,7 +78,25 @@ jobs:
         # inherited stdio, so their progress only reaches the Actions log
         # stream at this verbosity. Without it, a genuinely slow multi-hour
         # native build and a truly stuck one look identical in the log.
-        run: cargo build --workspace -vv
+        #
+        # The backgrounded heartbeat loop is diagnostic: a prior Linux run
+        # went completely silent for 60+ minutes with no way to tell
+        # whether the runner itself froze or just the compiler process did.
+        # If it happens again, comparing whether these heartbeat lines kept
+        # appearing (system alive, something else hung) against `free -h`'s
+        # own numbers (memory exhausted at the time it stopped) should
+        # finally give a real answer instead of another guess.
+        run: |
+          ( while true; do
+              sleep 60
+              echo "=== heartbeat $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
+              free -h
+              echo "--- top memory consumers ---"
+              ps -eo pid,ppid,%mem,%cpu,etime,cmd --sort=-%mem | head -15
+            done ) &
+          HEARTBEAT_PID=$!
+          trap 'kill "$HEARTBEAT_PID" 2>/dev/null || true' EXIT
+          cargo build --workspace -vv
 
       - name: cargo test (integration)
         run: cargo test -p osquery --features integration-tests -vv -- --nocapture
