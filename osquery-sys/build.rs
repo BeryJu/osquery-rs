@@ -58,13 +58,13 @@ fn main() {
         );
     }
 
-    // vendor/osquery is a git submodule (of a submodule, several levels
-    // deep for its own vendored third-party sources) -- submodules only
-    // record a pinned commit, not working-tree edits, so a local patch
-    // applied by hand to a file under vendor/ does NOT survive a fresh
-    // clone/checkout (including CI). Apply it here instead, idempotently,
-    // so a plain `cargo build` is reproducible from scratch.
-    apply_local_patches(&vendor_dir);
+    // NOTE: local patches (see apply_local_patches) are applied inside
+    // configure_and_build, between the CMake configure and build steps --
+    // NOT here. The patched file (a vendored Boost header) lives inside a
+    // nested submodule that osquery's own CMake configure step fetches
+    // lazily on demand; calling apply_local_patches this early panics with
+    // "No such file or directory" on a fresh checkout, since nothing has
+    // fetched that submodule yet at this point.
 
     // osquery's own build takes a very long time (fetches and compiles
     // dozens of third-party dependencies plus its own large codebase) and is
@@ -329,6 +329,17 @@ fn configure_and_build(vendor_dir: &Path, build_dir: &Path) {
     }
 
     run(&mut configure, "cmake configure");
+
+    // vendor/osquery is a git submodule (of a submodule, several levels
+    // deep for its own vendored third-party sources) -- submodules only
+    // record a pinned commit, not working-tree edits, so a local patch
+    // applied by hand to a file under vendor/ does NOT survive a fresh
+    // clone/checkout (including CI); apply it here instead, idempotently,
+    // so a plain `cargo build` is reproducible from scratch. This must run
+    // AFTER configure (which is what lazily fetches the nested submodule
+    // containing the patched file) and BEFORE build (which is what
+    // actually compiles it).
+    apply_local_patches(vendor_dir);
 
     let mut build = Command::new("cmake");
     build
