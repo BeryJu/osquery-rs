@@ -1,0 +1,18 @@
+[package]
+name = "osquery"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Safe API for an in-process embedded osquery runtime"
+
+[dependencies]
+osquery-sys = { path = "../osquery-sys" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+
+[features]
+# Gates tests/smoke.rs, which requires the full native osquery build to
+# have succeeded (see osquery-sys/build.rs) -- not run by a plain
+# `cargo test` since that build is heavy and platform-dependent.
+integration-tests = []

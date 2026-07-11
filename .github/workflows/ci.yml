@@ -1,0 +1,164 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  # osquery's own build needs Clang/CMake support that can crash under
+  # memory pressure with full parallelism (see osquery-sys/build.rs's
+  # num_jobs() -- this overrides its own default cap for CI runners, which
+  # generally have more headroom than the Docker Desktop VM that default
+  # was tuned for, but keeps it explicit and small enough to be safe).
+  NUM_JOBS: "3"
+
+jobs:
+  linux:
+    name: Linux (x86_64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore vendored osquery submodule cache
+        uses: actions/cache@v4
+        with:
+          path: vendor/osquery
+          key: vendor-osquery-linux-${{ hashFiles('.gitmodules') }}
+
+      - name: Fetch osquery submodule (recursive)
+        run: git submodule update --init --recursive
+
+      - name: Install build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git python3 bison flex make cmake ccache curl ca-certificates \
+            build-essential pkg-config
+
+      - name: Install osquery-toolchain
+        run: |
+          set -eux
+          curl -fsSL -o /tmp/toolchain.tar.xz \
+            "https://github.com/osquery/osquery-toolchain/releases/download/1.3.0/osquery-toolchain-1.3.0-x86_64.tar.xz"
+          sudo tar xf /tmp/toolchain.tar.xz -C /usr/local
+          rm /tmp/toolchain.tar.xz
+
+      - name: Shim xlocale.h into the toolchain sysroot
+        # osquery vendors augeas, whose gnulib submodule ships a pregenerated
+        # linux/x86_64 header assuming <xlocale.h> exists; glibc removed it
+        # years ago. Must live inside the toolchain's own sysroot -- its
+        # --sysroot redirects default header search there, not the runner's
+        # real /usr/local/include. See README.md "Known local patches".
+        run: |
+          sudo mkdir -p /usr/local/osquery-toolchain/usr/include
+          printf '#pragma once\n#include <locale.h>\n' | \
+            sudo tee /usr/local/osquery-toolchain/usr/include/xlocale.h > /dev/null
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Restore native osquery build cache
+        uses: actions/cache@v4
+        with:
+          path: build/osquery
+          key: build-osquery-linux-${{ hashFiles('.gitmodules', 'osquery-sys/build.rs') }}
+
+      - name: cargo build
+        run: cargo build --workspace
+
+      - name: cargo test (integration)
+        run: cargo test -p osquery --features integration-tests -- --nocapture
+
+  macos:
+    name: macOS (aarch64)
+    runs-on: macos-14
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore vendored osquery submodule cache
+        uses: actions/cache@v4
+        with:
+          path: vendor/osquery
+          key: vendor-osquery-macos-${{ hashFiles('.gitmodules') }}
+
+      - name: Fetch osquery submodule (recursive)
+        run: git submodule update --init --recursive
+
+      # osquery's own docs state its macOS build is broken on Xcode SDK
+      # >= 16.3; macos-14 runners ship multiple Xcode versions side by side.
+      # Pin an explicit, older one rather than whatever Xcode.app currently
+      # defaults to (unverified as of this writing -- adjust this version
+      # if the build fails on SDK incompatibility; check
+      # `ls /Applications | grep Xcode` in a run for what's actually
+      # available on the runner image in use).
+      - name: Select a supported Xcode version
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: "15.4"
+
+      - name: Install build prerequisites
+        run: brew install ccache git git-lfs cmake python clang-format flex bison
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Restore native osquery build cache
+        uses: actions/cache@v4
+        with:
+          path: build/osquery
+          key: build-osquery-macos-${{ hashFiles('.gitmodules', 'osquery-sys/build.rs') }}
+
+      - name: cargo build
+        run: cargo build --workspace
+
+      - name: cargo test (integration)
+        run: cargo test -p osquery --features integration-tests -- --nocapture
+
+  windows:
+    name: Windows (x86_64)
+    runs-on: windows-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore vendored osquery submodule cache
+        uses: actions/cache@v4
+        with:
+          path: vendor/osquery
+          key: vendor-osquery-windows-${{ hashFiles('.gitmodules') }}
+
+      - name: Fetch osquery submodule (recursive)
+        run: git submodule update --init --recursive
+
+      # winflexbison3 provides win_flex/win_bison; osquery's CMake looks for
+      # plain flex/bison names, so alias them. Unverified whether this (or
+      # anything else about the Windows path, which uses an untested "NMake
+      # Makefiles" CMake generator -- see osquery-sys/build.rs) is
+      # sufficient; iterate here based on actual failures.
+      - name: Install build prerequisites
+        run: |
+          choco install winflexbison3 -y
+          $binDir = "$env:ChocolateyInstall\bin"
+          Copy-Item "$binDir\win_flex.exe" "$binDir\flex.exe" -Force
+          Copy-Item "$binDir\win_bison.exe" "$binDir\bison.exe" -Force
+        shell: pwsh
+
+      # Sets up cl.exe/link.exe/nmake.exe on PATH for subsequent steps --
+      # required for the "NMake Makefiles" CMake generator our build.rs
+      # forces on Windows.
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Restore native osquery build cache
+        uses: actions/cache@v4
+        with:
+          path: build/osquery
+          key: build-osquery-windows-${{ hashFiles('.gitmodules', 'osquery-sys/build.rs') }}
+
+      - name: cargo build
+        run: cargo build --workspace
+
+      - name: cargo test (integration)
+        run: cargo test -p osquery --features integration-tests -- --nocapture

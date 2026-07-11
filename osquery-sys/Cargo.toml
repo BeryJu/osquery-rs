@@ -1,0 +1,14 @@
+[package]
+name = "osquery-sys"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Low-level FFI bindings to an in-process embedded osquery runtime"
+links = "osquery_embed_shim"
+build = "build.rs"
+
+[dependencies]
+
+[build-dependencies]
+cc = "1"
+shlex = "1"
