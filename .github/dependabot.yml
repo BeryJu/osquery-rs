@@ -1,0 +1,43 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directories:
+      - /
+    schedule:
+      interval: daily
+      time: "04:00"
+    open-pull-requests-limit: 10
+    assignees:
+      - BeryJu
+  - package-ecosystem: "github-actions"
+    directories:
+      - /
+    schedule:
+      interval: daily
+      time: "04:00"
+    open-pull-requests-limit: 10
+    assignees:
+      - BeryJu
+  - package-ecosystem: "docker"
+    directories:
+      - /docker
+    commit-message:
+      prefix: "containers:"
+    schedule:
+      interval: daily
+      time: "04:00"
+    open-pull-requests-limit: 10
+    assignees:
+      - BeryJu
+  - package-ecosystem: rust-toolchain
+    directory: "/"
+    schedule:
+      interval: daily
+      time: "04:00"
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: "core:"
+    labels:
+      - dependencies
+    cooldown:
+      default-days: 3
