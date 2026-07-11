@@ -76,7 +76,21 @@ fn main() {
         .map(PathBuf::from)
         .unwrap_or_else(|| cache_root.join(format!("build-{OSQUERY_TAG}")));
 
-    ensure_osquery_source(&src_dir);
+    let freshly_cloned = ensure_osquery_source(&src_dir);
+
+    // A build_dir left over from a *different* source checkout would still
+    // have a real osqueryd + link.txt sitting in it, but its flags.make/
+    // link.txt reference paths into src_dir's third-party submodules (e.g.
+    // boost) that a fresh clone hasn't fetched yet (those are only pulled
+    // lazily by CMake's own configure step below) -- discovering that
+    // stale osqueryd would skip configure_and_build entirely and only fail
+    // much later, confusingly, when the shim's own compile step can't find
+    // headers that were never fetched this run. Force a clean rebuild
+    // whenever the source itself was just freshly cloned.
+    if freshly_cloned && build_dir.exists() {
+        fs::remove_dir_all(&build_dir)
+            .unwrap_or_else(|e| panic!("failed to remove stale {}: {e}", build_dir.display()));
+    }
 
     let osqueryd_path = find_osqueryd(&build_dir);
     if osqueryd_path.is_none() {
@@ -172,6 +186,19 @@ fn cargo_target_dir() -> PathBuf {
         .to_path_buf()
 }
 
+/// Sets git tracing env vars on a git (or git-spawning) child process, so a
+/// stalled/slow network fetch produces continuous diagnostic output instead
+/// of potential total silence -- a long CI build with no visible progress is
+/// indistinguishable from a genuine hang otherwise. Applied both to our own
+/// explicit clone and to `cmake configure` (which triggers CMake's own
+/// nested `git submodule` fetches for boost/thrift/rocksdb/... as child
+/// processes that inherit this env either way).
+fn apply_git_diagnostics(cmd: &mut Command) {
+    cmd.env("GIT_TRACE", "1")
+        .env("GIT_CURL_VERBOSE", "1")
+        .env("GIT_TRACE_PERFORMANCE", "1");
+}
+
 /// Clones osquery's pinned tag into `dest` if it isn't already there.
 /// Shallow (`--depth 1`): we only need this exact tag's tree, not history.
 /// Nested third-party submodules (boost, thrift, rocksdb, ...) are NOT
@@ -181,9 +208,21 @@ fn cargo_target_dir() -> PathBuf {
 /// OSQUERY_BUILD_AWS/BPF/EXPERIMENTS below actually skip their heavy
 /// nested dependencies instead of just skipping the *build* of code
 /// that's already been fetched).
-fn ensure_osquery_source(dest: &Path) {
+/// Returns `true` if a fresh clone was actually performed (as opposed to
+/// `dest` already existing from a prior run) -- callers use this to decide
+/// whether any pre-existing `build_dir` output can still be trusted. A fresh
+/// source clone has none of osquery's third-party submodules fetched yet
+/// (those are pulled lazily by CMake's own configure step -- see below), so
+/// a `build_dir` left over from a *different* source checkout would have
+/// generated `flags.make`/`link.txt` referencing paths (e.g. into boost)
+/// that this fresh `dest` doesn't have content at yet. Silently reusing
+/// such a build_dir causes a working `osqueryd`/`link.txt` to be discovered
+/// while the shim's own compile step fails with cryptic missing-header
+/// errors from third-party include paths that were never actually fetched
+/// this run.
+fn ensure_osquery_source(dest: &Path) -> bool {
     if dest.join("CMakeLists.txt").exists() {
-        return;
+        return false;
     }
     let parent = dest
         .parent()
@@ -194,13 +233,16 @@ fn ensure_osquery_source(dest: &Path) {
     let mut clone = Command::new("git");
     clone
         .arg("clone")
+        .arg("--progress")
         .arg("--branch")
         .arg(OSQUERY_TAG)
         .arg("--depth")
         .arg("1")
         .arg(OSQUERY_REPO_URL)
         .arg(dest);
+    apply_git_diagnostics(&mut clone);
     run(&mut clone, "git clone osquery");
+    true
 }
 
 /// Applies known local patches to the freshly cloned osquery tree, each
@@ -371,6 +413,14 @@ fn configure_and_build(src_dir: &Path, build_dir: &Path) {
         // Windows -- it also trims a substantial dependency from every
         // platform's build.
         .arg("-DOSQUERY_BUILD_AWS=OFF")
+        // Makefile-family generators (both "Unix Makefiles" and "NMake
+        // Makefiles") only print terse "[ x%] Building ..." lines by
+        // default -- no indication of which specific translation unit is
+        // in flight for longer than that, and long silent gaps are
+        // impossible to distinguish from a genuine hang purely from CI log
+        // output. This makes every generated build rule echo its full
+        // compiler invocation instead, at the cost of a much larger log.
+        .arg("-DCMAKE_VERBOSE_MAKEFILE=ON")
         .arg("-G")
         .arg(if cfg!(windows) {
             "NMake Makefiles"
@@ -431,6 +481,7 @@ fn configure_and_build(src_dir: &Path, build_dir: &Path) {
         // docs) for the OpenSSL formula's build; also must be on PATH.
     }
 
+    apply_git_diagnostics(&mut configure);
     run(&mut configure, "cmake configure");
 
     // The patched file (a vendored Boost header) lives inside a nested
