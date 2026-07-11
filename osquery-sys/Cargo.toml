@@ -15,4 +15,4 @@ build = "build.rs"
 
 [build-dependencies]
 cc = "1"
-shlex = "1"
+shlex = "2"
