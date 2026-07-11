@@ -84,8 +84,14 @@ fn main() {
     }
     let osqueryd_path =
         find_osqueryd(&build_dir).expect("osqueryd was not produced by the configured build");
-    let link_txt_path = find_link_txt(&build_dir, "osqueryd")
-        .expect("could not find osqueryd's CMake-generated link.txt");
+    let link_txt_path = find_link_txt(&build_dir, "osqueryd").unwrap_or_else(|| {
+        panic!(
+            "could not find osqueryd's CMake-generated link.txt under {} \
+             -- directories matching \"osqueryd\":{}",
+            build_dir.display(),
+            describe_missing_link_txt(&build_dir, "osqueryd")
+        )
+    });
 
     let link_line = fs::read_to_string(&link_txt_path)
         .unwrap_or_else(|e| panic!("failed to read {}: {e}", link_txt_path.display()));
@@ -275,6 +281,55 @@ fn find_osqueryd(build_dir: &Path) -> Option<PathBuf> {
 fn find_link_txt(build_dir: &Path, target: &str) -> Option<PathBuf> {
     let dir_name = format!("{target}.dir");
     find_file_in_dir_named(build_dir, &dir_name, "link.txt")
+}
+
+/// Called only when `find_link_txt` comes back empty, to turn an otherwise
+/// silent "not found" into an actionable panic message. Walks `build_dir`
+/// collecting every directory whose name contains `needle` (case-insensitive
+/// substring, not an exact `.dir`-suffixed match -- deliberately looser than
+/// `find_file_in_dir_named`'s own matching, so this still reports something
+/// useful even if the real directory is named subtly differently than
+/// expected), listing each one's immediate contents.
+fn describe_missing_link_txt(build_dir: &Path, needle: &str) -> String {
+    let mut hits = Vec::new();
+    collect_dirs_containing(build_dir, &needle.to_ascii_lowercase(), &mut hits);
+    if hits.is_empty() {
+        return format!(
+            "no directory anywhere under {} has a name containing {needle:?} at all",
+            build_dir.display()
+        );
+    }
+    let mut report = String::new();
+    for dir in hits {
+        report.push_str(&format!("\n  {}:\n", dir.display()));
+        match fs::read_dir(&dir) {
+            Ok(entries) => {
+                for entry in entries.flatten() {
+                    report.push_str(&format!("    {}\n", entry.file_name().to_string_lossy()));
+                }
+            }
+            Err(e) => report.push_str(&format!("    <failed to list: {e}>\n")),
+        }
+    }
+    report
+}
+
+fn collect_dirs_containing(root: &Path, needle_lower: &str, hits: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            if name.to_ascii_lowercase().contains(needle_lower) {
+                hits.push(path.clone());
+            }
+        }
+        collect_dirs_containing(&path, needle_lower, hits);
+    }
 }
 
 fn configure_and_build(src_dir: &Path, build_dir: &Path) {
@@ -986,7 +1041,15 @@ fn find_file_in_dir_named(root: &Path, dir_name: &str, file_name: &str) -> Optio
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            if path.file_name().and_then(|n| n.to_str()) == Some(dir_name) {
+            // Case-insensitive: Windows filesystems are case-preserving but
+            // not case-sensitive, and there's no guarantee CMake's generated
+            // directory name and our own expected `{target}.dir` string
+            // agree on case in every generator/version combination.
+            let is_match = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.eq_ignore_ascii_case(dir_name));
+            if is_match {
                 let candidate = path.join(file_name);
                 if candidate.exists() {
                     return Some(candidate);
