@@ -5,14 +5,6 @@ on:
     branches: [main]
   pull_request:
 
-env:
-  # osquery's own build needs Clang/CMake support that can crash under
-  # memory pressure with full parallelism (see osquery-sys/build.rs's
-  # num_jobs() -- this overrides its own default cap for CI runners, which
-  # generally have more headroom than the Docker Desktop VM that default
-  # was tuned for, but keeps it explicit and small enough to be safe).
-  NUM_JOBS: "3"
-
 jobs:
   linux:
     name: Linux (x86_64)
