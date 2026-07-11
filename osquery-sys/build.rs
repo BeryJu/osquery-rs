@@ -186,17 +186,19 @@ fn cargo_target_dir() -> PathBuf {
         .to_path_buf()
 }
 
-/// Sets git tracing env vars on a git (or git-spawning) child process, so a
-/// stalled/slow network fetch produces continuous diagnostic output instead
-/// of potential total silence -- a long CI build with no visible progress is
-/// indistinguishable from a genuine hang otherwise. Applied both to our own
-/// explicit clone and to `cmake configure` (which triggers CMake's own
-/// nested `git submodule` fetches for boost/thrift/rocksdb/... as child
-/// processes that inherit this env either way).
+/// Sets a single, lightweight git tracing env var on a git (or
+/// git-spawning) child process, so a stalled/slow network fetch produces
+/// some continuous diagnostic output instead of potential total silence.
+/// Deliberately just `GIT_TRACE` (one line per git subcommand dispatched) --
+/// `GIT_CURL_VERBOSE` (full HTTP request/response headers) and
+/// `GIT_TRACE_PERFORMANCE` (per-internal-operation timing) were tried too,
+/// but across ~30 nested submodule fetches during `cmake configure` they
+/// multiplied CI log volume enough to be its own problem (log fetches were
+/// getting truncated well before reaching the actual error). Applied both
+/// to our own explicit clone and to `cmake configure` (whose nested `git
+/// submodule` fetches for boost/thrift/rocksdb/... inherit this env too).
 fn apply_git_diagnostics(cmd: &mut Command) {
-    cmd.env("GIT_TRACE", "1")
-        .env("GIT_CURL_VERBOSE", "1")
-        .env("GIT_TRACE_PERFORMANCE", "1");
+    cmd.env("GIT_TRACE", "1");
 }
 
 /// Clones osquery's pinned tag into `dest` if it isn't already there.
@@ -413,14 +415,15 @@ fn configure_and_build(src_dir: &Path, build_dir: &Path) {
         // Windows -- it also trims a substantial dependency from every
         // platform's build.
         .arg("-DOSQUERY_BUILD_AWS=OFF")
-        // Makefile-family generators (both "Unix Makefiles" and "NMake
-        // Makefiles") only print terse "[ x%] Building ..." lines by
-        // default -- no indication of which specific translation unit is
-        // in flight for longer than that, and long silent gaps are
-        // impossible to distinguish from a genuine hang purely from CI log
-        // output. This makes every generated build rule echo its full
-        // compiler invocation instead, at the cost of a much larger log.
-        .arg("-DCMAKE_VERBOSE_MAKEFILE=ON")
+        // NOTE: CMAKE_VERBOSE_MAKEFILE=ON was tried here to get per-file
+        // compiler invocations instead of terse "[ x%] Building ..." lines,
+        // but for a codebase this large (osquery + ~30 vendored
+        // dependencies) it multiplied CI log volume enough to make log
+        // fetches truncate before reaching the actual error -- removed.
+        // `cargo build -vv` already surfaces enough for our own crate's
+        // build; a genuinely stuck native build is better diagnosed by
+        // checking for CI runner contention first (see git history/PR
+        // discussion) than by maximizing this log's verbosity further.
         .arg("-G")
         .arg(if cfg!(windows) {
             "NMake Makefiles"

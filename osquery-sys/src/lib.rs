@@ -19,7 +19,7 @@ pub const OSQUERY_EMBED_QUERY_FAILED: u32 = 3;
 pub const OSQUERY_EMBED_EXCEPTION: u32 = 4;
 pub const OSQUERY_EMBED_UNKNOWN: u32 = 5;
 
-extern "C" {
+unsafe extern "C" {
     pub fn osquery_embed_init(argc: c_int, argv: *mut *mut c_char) -> i32;
     pub fn osquery_embed_shutdown() -> i32;
     pub fn osquery_embed_query(
