@@ -98,31 +98,16 @@ fn main() {
     }
     let osqueryd_path =
         find_osqueryd(&build_dir).expect("osqueryd was not produced by the configured build");
-    let link_txt_path = find_link_txt(&build_dir, "osqueryd").unwrap_or_else(|| {
+    let (link_line, link_cwd) = find_link_line(&build_dir, "osqueryd").unwrap_or_else(|| {
         panic!(
-            "could not find osqueryd's CMake-generated link.txt under {} \
+            "could not find osqueryd's CMake-generated link command under {} \
              -- directories matching \"osqueryd\":{}",
             build_dir.display(),
             describe_missing_link_txt(&build_dir, "osqueryd")
         )
     });
 
-    let link_line = fs::read_to_string(&link_txt_path)
-        .unwrap_or_else(|e| panic!("failed to read {}: {e}", link_txt_path.display()));
-
     let (cxx_compiler, sysroot) = read_cmake_cache_compiler(&build_dir);
-
-    // CMake's Makefile generator runs link.txt with its CWD set to the
-    // target's own build directory (three levels above link.txt: strip
-    // `CMakeFiles/<target>.dir/link.txt`) -- most of the archive paths in
-    // it are relative to THAT, not to whatever directory cargo eventually
-    // invokes the linker from. Resolve them to absolute paths now.
-    let link_cwd = link_txt_path
-        .parent()
-        .and_then(Path::parent)
-        .and_then(Path::parent)
-        .unwrap_or_else(|| panic!("{} has an unexpectedly shallow path", link_txt_path.display()))
-        .to_path_buf();
 
     let mut items = collect_link_items(&link_line, &osqueryd_path, &link_cwd);
     if cfg!(target_os = "linux") {
@@ -322,10 +307,80 @@ fn find_osqueryd(build_dir: &Path) -> Option<PathBuf> {
     find_file_named(build_dir, osqueryd_name())
 }
 
-fn find_link_txt(build_dir: &Path, target: &str) -> Option<PathBuf> {
+/// Returns the full link command line for `target`, plus the directory it
+/// must be resolved relative to (CMake runs link.txt/build.make's link rule
+/// with its CWD set to the target's own source-relative build directory --
+/// e.g. `build_dir/osquery/` for a target defined in
+/// `osquery/CMakeLists.txt` -- not the `CMakeFiles/<target>.dir/` folder
+/// the command itself lives in, which is two levels deeper).
+///
+/// On Linux/macOS ("Unix Makefiles"), this is literally the contents of
+/// `link.txt`. On Windows ("NMake Makefiles" + MSVC), CMake doesn't write a
+/// standalone link.txt for the final executable at all -- see
+/// `extract_link_line_from_build_make` for why -- so that's tried as a
+/// fallback.
+fn find_link_line(build_dir: &Path, target: &str) -> Option<(String, PathBuf)> {
     let dir = find_target_dir(build_dir, target)?;
-    let candidate = dir.join("link.txt");
-    candidate.exists().then_some(candidate)
+    let link_cwd = dir.parent().and_then(Path::parent)?.to_path_buf();
+
+    if let Ok(line) = fs::read_to_string(dir.join("link.txt")) {
+        return Some((line, link_cwd));
+    }
+    let line = extract_link_line_from_build_make(&dir.join("build.make"))?;
+    Some((line, link_cwd))
+}
+
+/// On Windows, CMake's "NMake Makefiles" generator (forced because the
+/// "Visual Studio" generator's MSBuild `.vcxproj` files have nothing
+/// resembling `link.txt`/`flags.make` -- see the module doc comment)
+/// doesn't write a standalone `link.txt` for the final executable either.
+/// Instead it wraps the real link invocation in `cmake -E vs_link_exe` (a
+/// CMake-internal helper that emulates Visual Studio's manifest/
+/// incremental-link handling for non-VS generators targeting MSVC) and
+/// expresses the actual linker command as an inline NMake response-file
+/// block directly inside `build.make`: the wrapper's own command line ends
+/// in `@<<`, and one or more following lines (terminated by a line
+/// containing only `<<`) are the real flags/libraries, exactly as if
+/// they'd been written to an external response file CMake then referenced.
+/// Reconstruct that block as a single line so it can be tokenized the same
+/// way `link.txt`'s content is on Linux/macOS.
+fn extract_link_line_from_build_make(build_make: &Path) -> Option<String> {
+    let contents = fs::read_to_string(build_make).ok()?;
+    let lines: Vec<&str> = contents.lines().collect();
+
+    for (i, line) in lines.iter().enumerate() {
+        if !line.to_ascii_lowercase().contains("link.exe") {
+            continue;
+        }
+        // CMake's own wrapper args (`-E vs_link_exe --msvc-ver=... --rc=...
+        // --mt=... --manifests ...`) precede a ` -- ` separator, after
+        // which the real, wrapped command begins.
+        let after_wrapper = line.rsplit_once(" -- ").map_or(*line, |(_, tail)| tail).trim();
+        let Some(header) = after_wrapper.strip_suffix("@<<") else {
+            continue;
+        };
+
+        let mut full = header.trim_end().to_string();
+        let mut found_terminator = false;
+        for cont in lines.iter().skip(i + 1).take(64) {
+            if cont.trim() == "<<" {
+                found_terminator = true;
+                break;
+            }
+            full.push(' ');
+            full.push_str(cont.trim());
+        }
+        if !found_terminator {
+            // Didn't find the closing marker within a sane distance --
+            // this isn't the block we think it is (or the format changed
+            // in a way this parsing doesn't understand). Don't guess with
+            // however much unrelated build.make content we scooped up;
+            // let the caller's diagnostic panic fire instead.
+            continue;
+        }
+        return Some(full);
+    }
+    None
 }
 
 /// Every CMake target we look for by name (`osqueryd`, `osquery_core`) is
@@ -371,7 +426,7 @@ fn find_dir_named(root: &Path, dir_name: &str) -> Option<PathBuf> {
     None
 }
 
-/// Called only when `find_link_txt` comes back empty, to turn an otherwise
+/// Called only when `find_link_line` comes back empty, to turn an otherwise
 /// silent "not found" into an actionable panic message. Walks `build_dir`
 /// collecting every directory whose name contains `needle` (case-insensitive
 /// substring, not an exact `.dir`-suffixed match -- deliberately looser than
@@ -746,7 +801,12 @@ fn collect_link_items(link_line: &str, osqueryd_path: &Path, link_cwd: &Path) ->
         let tok = tokens[i].as_str();
 
         if cfg!(windows) {
-            if tok.starts_with("/OUT:") {
+            // CMake's `cmake -E vs_link_exe` wrapper (used for the NMake
+            // Makefiles generator, see find_link_line/
+            // extract_link_line_from_build_make) emits this flag lowercase
+            // (`/out:...`), unlike a hand-written link.txt which might use
+            // `/OUT:` -- match case-insensitively rather than assuming one.
+            if tok.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("/OUT:")) {
                 i += 1;
                 continue;
             }
