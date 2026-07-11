@@ -2,7 +2,7 @@
 # Linux recipe (docs/wiki/development/building.md in the vendored submodule)
 # instead of the host's toolchain, since osquery's macOS build is documented
 # as broken on Xcode SDK >= 16.3.
-FROM ubuntu:24.04
+FROM ubuntu:26.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
