@@ -86,12 +86,19 @@ not against this crate's own code):
   hard-errors on an out-of-range enum arithmetic trick the pinned Boost
   version relies on. If the submodule is ever reset, reapply this patch
   (see git history / diff on that file) before rebuilding.
-- `docker/build.Dockerfile` writes a passthrough `xlocale.h` shim inside
-  the toolchain's sysroot (`usr/include/xlocale.h`, *not* the container's
-  own `/usr/local/include` -- `--sysroot` redirects default header search
-  paths there): osquery vendors augeas, whose gnulib submodule ships a
-  pregenerated `linux/aarch64` header assuming `<xlocale.h>` exists; glibc
-  removed it years ago.
+- `docker/build.Dockerfile` (and CI) conditionally write a passthrough
+  `xlocale.h` shim inside the toolchain's sysroot (`usr/include/xlocale.h`,
+  *not* the container's own `/usr/local/include` -- `--sysroot` redirects
+  default header search paths there), **only if the file doesn't already
+  exist**: osquery vendors augeas, whose gnulib submodule ships a
+  pregenerated header assuming `<xlocale.h>` exists, and real glibc removed
+  it years ago -- but the `osquery-toolchain` 1.3.0 release ships a
+  meaningfully *older* glibc header snapshot for x86_64 than for aarch64.
+  aarch64's genuinely lacks `xlocale.h` (needs the shim); x86_64's already
+  has a complete, real one (old enough to still need it directly) that a
+  blind unconditional overwrite clobbers with a shim that's circular there.
+  Check which case applies before assuming the fix generalizes to a new
+  architecture.
 - A nested git submodule (boost's `libs/regex`) can end up incompletely
   fetched if a transient network failure hits mid-clone and is never
   retried on a later reconfigure (the directory is left with just a `.git`

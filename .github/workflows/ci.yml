@@ -45,16 +45,21 @@ jobs:
           sudo tar xf /tmp/toolchain.tar.xz -C /usr/local
           rm /tmp/toolchain.tar.xz
 
-      - name: Shim xlocale.h into the toolchain sysroot
+      - name: Shim xlocale.h into the toolchain sysroot (only if missing)
         # osquery vendors augeas, whose gnulib submodule ships a pregenerated
-        # linux/x86_64 header assuming <xlocale.h> exists; glibc removed it
-        # years ago. Must live inside the toolchain's own sysroot -- its
-        # --sysroot redirects default header search there, not the runner's
-        # real /usr/local/include. See README.md "Known local patches".
+        # header assuming <xlocale.h> exists; real xlocale.h was removed from
+        # modern glibc years ago. This toolchain release's x86_64 build
+        # ALREADY ships a complete, real xlocale.h (its glibc header
+        # snapshot is old enough to still need it) -- only aarch64's is
+        # missing it. Must check before writing: blindly overwriting
+        # clobbers x86_64's working file with a shim that's circular there
+        # (locale.h itself needs this type before it can finish processing
+        # on that older snapshot). See README.md "Known local patches".
         run: |
-          sudo mkdir -p /usr/local/osquery-toolchain/usr/include
-          printf '#pragma once\n#include <locale.h>\n' | \
-            sudo tee /usr/local/osquery-toolchain/usr/include/xlocale.h > /dev/null
+          if [ ! -f /usr/local/osquery-toolchain/usr/include/xlocale.h ]; then
+            printf '#pragma once\n#include <locale.h>\n' | \
+              sudo tee /usr/local/osquery-toolchain/usr/include/xlocale.h > /dev/null
+          fi
 
       - uses: dtolnay/rust-toolchain@stable
 

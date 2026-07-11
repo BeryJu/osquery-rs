@@ -24,18 +24,28 @@ RUN set -eux; \
     rm /tmp/toolchain.tar.xz
 
 # osquery vendors augeas, whose gnulib submodule ships a pregenerated
-# linux/aarch64 header assuming <xlocale.h> exists. glibc folded that
-# header's contents into <locale.h>/<features.h> and removed it years ago;
-# Ubuntu 24.04's glibc no longer ships it. Standard shim: a passthrough
-# header satisfies the #include without reintroducing the legacy API.
+# header assuming <xlocale.h> exists; real xlocale.h was removed from
+# modern glibc years ago. This toolchain release turns out to ship a
+# meaningfully OLDER glibc header snapshot for x86_64 than for aarch64,
+# though: aarch64's usr/include genuinely lacks xlocale.h (its
+# <locale.h>/<string.h>/<time.h> use <bits/types/locale_t.h> instead and
+# never need it), while x86_64's usr/include ALREADY HAS a complete, real
+# xlocale.h (its headers are old enough to still declare functions using
+# __locale_t via that file). Blindly writing a passthrough shim
+# unconditionally clobbered x86_64's perfectly good real xlocale.h with a
+# `#include <locale.h>`-only stub, which is circular there (locale.h
+# itself needs this type before it can finish processing) -- only write
+# the shim if the file doesn't already exist.
 #
 # osquery's build passes --sysroot=/usr/local/osquery-toolchain (set via
 # OSQUERY_TOOLCHAIN_SYSROOT), which redirects absolute default header
 # search paths (/usr/include, /usr/local/include, ...) into that sysroot
 # instead of the container's real filesystem -- so the shim must live
 # inside the sysroot, not at the container's own /usr/local/include.
-RUN printf '#pragma once\n#include <locale.h>\n' \
-      > /usr/local/osquery-toolchain/usr/include/xlocale.h
+RUN if [ ! -f /usr/local/osquery-toolchain/usr/include/xlocale.h ]; then \
+      printf '#pragma once\n#include <locale.h>\n' \
+        > /usr/local/osquery-toolchain/usr/include/xlocale.h; \
+    fi
 
 # Rust toolchain, to build/test the actual crates once osquery links.
 RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
