@@ -255,6 +255,19 @@ fn configure_and_build(vendor_dir: &Path, build_dir: &Path) {
         // being invoked twice). We don't need BPF-based Linux process/file
         // event tables for in-process SQL queries.
         .arg("-DOSQUERY_BUILD_BPF=OFF")
+        // OSQUERY_BUILD_AWS defaults ON on every platform except
+        // Windows-arm64, pulling in aws-sdk-cpp/aws-crt-cpp/aws-c-*/s2n.
+        // aws-c-common alone vendors CBMC formal-verification proof
+        // submodules (litani, aws-verification-model-for-libcrypto, ...)
+        // with absurdly deep nested paths that blow past Windows'
+        // filesystem path-length limits (`fatal: cannot write keep file
+        // '...pack-<sha>.keep': Filename too long`) regardless of whether
+        // they're fetched upfront or lazily during configure. We don't
+        // need AWS Firehose/Kinesis logger plugins for in-process SQL
+        // queries, so disable it everywhere rather than special-casing
+        // Windows -- it also trims a substantial dependency from every
+        // platform's build.
+        .arg("-DOSQUERY_BUILD_AWS=OFF")
         .arg("-G")
         .arg(if cfg!(windows) {
             "NMake Makefiles"
@@ -442,6 +455,21 @@ fn filter_link_tokens(link_line: &str, osqueryd_path: &Path, link_cwd: &Path) ->
             }
             if tok.ends_with(".a") && is_osquery_main_archive(tok) {
                 i += 1;
+                continue;
+            }
+            // Two-token flags whose second token is a bare name (arch,
+            // framework name, ...), NOT a path -- must be passed through
+            // unresolved. Missing this for `-arch` caused
+            // `resolve_token_path` to "helpfully" treat a bare `arm64` as
+            // a relative path and mangle it into
+            // `<link_cwd>/arm64`, which clang then rejected as an invalid
+            // arch name. ld64 (macOS) uses many of these; Linux's ld
+            // doesn't take `-arch`/`-framework` at all, so this is a
+            // no-op there regardless of the OS check being unconditional.
+            if matches!(tok, "-arch" | "-framework" | "-weak_framework") && i + 1 < tokens.len() {
+                out.push(tok.to_string());
+                out.push(tokens[i + 1].clone());
+                i += 2;
                 continue;
             }
         }

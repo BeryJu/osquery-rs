@@ -68,12 +68,26 @@ On Linux, `osquery-sys/build.rs` requires the
 prebuilt LLVM/libc++ toolchain osquery's own docs specify) to be installed;
 by default it looks at `/usr/local/osquery-toolchain`
 (`docker/build.Dockerfile` installs it there), overridable via
-`OSQUERY_TOOLCHAIN_SYSROOT`. `build.rs` also passes
-`-DOSQUERY_BUILD_EXPERIMENTS=OFF -DOSQUERY_BUILD_BPF=OFF` when configuring
-osquery -- both pull in an eBPF-based Linux-events component whose vendored
-LLVM collides with osquery's own top-level zlib import under the same CMake
-binary directory (a real upstream CMake fragility with this toolchain/LLVM
-combination); neither is needed for in-process SQL queries.
+`OSQUERY_TOOLCHAIN_SYSROOT`. `build.rs` also passes, on every platform:
+
+- `-DOSQUERY_BUILD_EXPERIMENTS=OFF -DOSQUERY_BUILD_BPF=OFF`: both pull in an
+  eBPF-based Linux-events component whose vendored LLVM collides with
+  osquery's own top-level zlib import under the same CMake binary directory
+  (a real upstream CMake fragility with this toolchain/LLVM combination);
+  neither is needed for in-process SQL queries.
+- `-DOSQUERY_BUILD_AWS=OFF`: aws-sdk-cpp (needed for the AWS Firehose/Kinesis
+  logger plugins, not needed here) vendors aws-c-common, which in turn
+  vendors CBMC formal-verification proof submodules with absurdly deep
+  nested paths -- these overflow Windows' filesystem path-length limits
+  regardless of when they're fetched, and broke Windows CI outright before
+  this was added.
+
+CI (see below) also does a **non-recursive** submodule fetch
+(`git submodule update --init`, not `--recursive`): osquery's own CMake
+configure step lazily fetches each nested third-party submodule on demand,
+per-platform, so a blanket recursive fetch upfront needlessly pulls in
+platform-irrelevant content too (this is also how local verification always
+worked, without ever running a recursive fetch by hand).
 
 **Known local patches / environment fixes** (all against `vendor/osquery`'s
 checked-out working tree, or the `docker/build.Dockerfile` environment --
