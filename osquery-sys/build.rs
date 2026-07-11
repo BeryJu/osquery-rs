@@ -354,6 +354,26 @@ fn describe_missing_link_txt(build_dir: &Path, needle: &str) -> String {
             }
             Err(e) => report.push_str(&format!("    <failed to list: {e}>\n")),
         }
+
+        // No standalone link.txt on at least some CMake/generator
+        // combinations (observed on Windows/NMake) -- the actual link
+        // invocation may be embedded directly in build.make instead. Dump
+        // only lines that look linker-related (filtered to keep this from
+        // becoming its own log-volume problem) so a fix can be designed
+        // from the real format instead of guessed at blindly.
+        let build_make = dir.join("build.make");
+        if let Ok(contents) = fs::read_to_string(&build_make) {
+            report.push_str(&format!("\n  relevant lines from {}:\n", build_make.display()));
+            for line in contents.lines() {
+                let lower = line.to_ascii_lowercase();
+                if lower.contains("link")
+                    || lower.contains(".exe")
+                    || lower.contains("cmake_link_script")
+                {
+                    report.push_str(&format!("    {line}\n"));
+                }
+            }
+        }
     }
     report
 }
