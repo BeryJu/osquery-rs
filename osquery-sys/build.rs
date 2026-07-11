@@ -323,15 +323,59 @@ fn find_osqueryd(build_dir: &Path) -> Option<PathBuf> {
 }
 
 fn find_link_txt(build_dir: &Path, target: &str) -> Option<PathBuf> {
+    let dir = find_target_dir(build_dir, target)?;
+    let candidate = dir.join("link.txt");
+    candidate.exists().then_some(candidate)
+}
+
+/// Every CMake target we look for by name (`osqueryd`, `osquery_core`) is
+/// defined directly in (or included from) `osquery/CMakeLists.txt`, so its
+/// generated `CMakeFiles/<target>.dir/` always lands at this one consistent
+/// location -- checking it directly (one `is_dir()` stat) avoids the
+/// unbounded recursive walk `find_dir_named` falls back to below. That walk
+/// visits every directory in `build_dir` with no pruning at all, and once
+/// every vendored third-party dependency (boost, thrift, rocksdb,
+/// sleuthkit, openssl, sqlite, ...) is actually compiled, that tree can
+/// have hundreds of thousands of files -- on Linux CI specifically (whose
+/// build produces meaningfully more such files than the macOS/Windows
+/// builds do) this walk alone was slow enough to be indistinguishable from
+/// a genuine hang. The slow path is kept as a fallback purely so this still
+/// works if a future osquery version changes the layout.
+fn find_target_dir(build_dir: &Path, target: &str) -> Option<PathBuf> {
     let dir_name = format!("{target}.dir");
-    find_file_in_dir_named(build_dir, &dir_name, "link.txt")
+    let fast_path = build_dir.join("osquery").join("CMakeFiles").join(&dir_name);
+    if fast_path.is_dir() {
+        return Some(fast_path);
+    }
+    find_dir_named(build_dir, &dir_name)
+}
+
+fn find_dir_named(root: &Path, dir_name: &str) -> Option<PathBuf> {
+    let entries = fs::read_dir(root).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let is_match = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.eq_ignore_ascii_case(dir_name));
+        if is_match {
+            return Some(path);
+        }
+        if let Some(found) = find_dir_named(&path, dir_name) {
+            return Some(found);
+        }
+    }
+    None
 }
 
 /// Called only when `find_link_txt` comes back empty, to turn an otherwise
 /// silent "not found" into an actionable panic message. Walks `build_dir`
 /// collecting every directory whose name contains `needle` (case-insensitive
 /// substring, not an exact `.dir`-suffixed match -- deliberately looser than
-/// `find_file_in_dir_named`'s own matching, so this still reports something
+/// `find_dir_named`'s own matching, so this still reports something
 /// useful even if the real directory is named subtly differently than
 /// expected), listing each one's immediate contents.
 fn describe_missing_link_txt(build_dir: &Path, needle: &str) -> String {
@@ -1078,8 +1122,8 @@ fn compile_compat_stubs(shim_dir: &Path, cxx_compiler: &Path) -> PathBuf {
 /// characters through literally and corrupt the values -- must do the same
 /// shell-word unescaping a real shell would.
 fn read_target_compile_flags(build_dir: &Path, target: &str) -> Option<(Vec<String>, Vec<String>)> {
-    let dir_name = format!("{target}.dir");
-    let flags_make = find_file_in_dir_named(build_dir, &dir_name, "flags.make")?;
+    let dir = find_target_dir(build_dir, target)?;
+    let flags_make = dir.join("flags.make");
     let contents = fs::read_to_string(&flags_make).ok()?;
 
     let mut defines = Vec::new();
@@ -1110,29 +1154,3 @@ fn find_file_named(root: &Path, name: &str) -> Option<PathBuf> {
     None
 }
 
-fn find_file_in_dir_named(root: &Path, dir_name: &str, file_name: &str) -> Option<PathBuf> {
-    let entries = fs::read_dir(root).ok()?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            // Case-insensitive: Windows filesystems are case-preserving but
-            // not case-sensitive, and there's no guarantee CMake's generated
-            // directory name and our own expected `{target}.dir` string
-            // agree on case in every generator/version combination.
-            let is_match = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.eq_ignore_ascii_case(dir_name));
-            if is_match {
-                let candidate = path.join(file_name);
-                if candidate.exists() {
-                    return Some(candidate);
-                }
-            }
-            if let Some(found) = find_file_in_dir_named(&path, dir_name, file_name) {
-                return Some(found);
-            }
-        }
-    }
-    None
-}
