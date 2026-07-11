@@ -47,7 +47,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Restore osquery source + native build cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           # build.rs clones osquery's pinned tag itself (no git submodule)
           # and caches both the cloned source and the native build under
@@ -93,7 +93,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Restore osquery source + native build cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: target/osquery-sys
           key: osquery-sys-macos-${{ hashFiles('osquery-sys/build.rs') }}
@@ -144,7 +144,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Restore osquery source + native build cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: target/osquery-sys
           key: osquery-sys-windows-${{ hashFiles('osquery-sys/build.rs') }}
