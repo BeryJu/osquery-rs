@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 240
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install build prerequisites
         run: |
@@ -73,7 +73,7 @@ jobs:
     runs-on: macos-14
     timeout-minutes: 240
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # osquery's own docs state its macOS build is broken on Xcode SDK
       # >= 16.3; macos-14 runners ship multiple Xcode versions side by side.
@@ -121,7 +121,7 @@ jobs:
         # disabling OSQUERY_BUILD_AWS (which removed the worst offender).
         run: git config --global core.longpaths true
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # winflexbison3 provides win_flex/win_bison; osquery's CMake looks for
       # plain flex/bison names, so alias them. Unverified whether this (or
