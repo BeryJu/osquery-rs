@@ -3,6 +3,10 @@ name = "osquery"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme = "../README.md"
+keywords.workspace = true
+categories.workspace = true
 description = "Safe API for an in-process embedded osquery runtime"
 
 [dependencies]

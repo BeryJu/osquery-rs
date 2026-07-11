@@ -21,25 +21,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Restore vendored osquery submodule cache
-        uses: actions/cache@v4
-        with:
-          path: vendor/osquery
-          key: vendor-osquery-linux-${{ hashFiles('.gitmodules') }}
-
-      - name: Fetch osquery submodule (top-level only)
-        # NOT --recursive: osquery's own CMake configure step lazily fetches
-        # each nested third-party submodule on demand, per-platform, via its
-        # importSourceSubmodule()/initializeGitSubmodule() mechanism (see
-        # libraries/cmake/source/modules/utils.cmake) -- exactly what
-        # happened during local verification, without ever running a
-        # blanket recursive fetch ourselves. Fetching everything recursively
-        # upfront pulls in platform-irrelevant content too (e.g. Linux-only
-        # libdevmapper/libcryptsetup), which broke Windows outright: some of
-        # that content hits Windows path-length limits and at least one
-        # reserved device name (a file literally called `aux.sh`).
-        run: git submodule update --init
-
       - name: Install build prerequisites
         run: |
           sudo apt-get update
@@ -73,11 +54,15 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Restore native osquery build cache
+      - name: Restore osquery source + native build cache
         uses: actions/cache@v4
         with:
-          path: build/osquery
-          key: build-osquery-linux-${{ hashFiles('.gitmodules', 'osquery-sys/build.rs') }}
+          # build.rs clones osquery's pinned tag itself (no git submodule)
+          # and caches both the cloned source and the native build under
+          # target/osquery-sys/{src,build}-<tag>/ -- see cargo_target_dir()
+          # in osquery-sys/build.rs.
+          path: target/osquery-sys
+          key: osquery-sys-linux-${{ hashFiles('osquery-sys/build.rs') }}
 
       - name: cargo build
         run: cargo build --workspace
@@ -91,25 +76,6 @@ jobs:
     timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
-
-      - name: Restore vendored osquery submodule cache
-        uses: actions/cache@v4
-        with:
-          path: vendor/osquery
-          key: vendor-osquery-macos-${{ hashFiles('.gitmodules') }}
-
-      - name: Fetch osquery submodule (top-level only)
-        # NOT --recursive: osquery's own CMake configure step lazily fetches
-        # each nested third-party submodule on demand, per-platform, via its
-        # importSourceSubmodule()/initializeGitSubmodule() mechanism (see
-        # libraries/cmake/source/modules/utils.cmake) -- exactly what
-        # happened during local verification, without ever running a
-        # blanket recursive fetch ourselves. Fetching everything recursively
-        # upfront pulls in platform-irrelevant content too (e.g. Linux-only
-        # libdevmapper/libcryptsetup), which broke Windows outright: some of
-        # that content hits Windows path-length limits and at least one
-        # reserved device name (a file literally called `aux.sh`).
-        run: git submodule update --init
 
       # osquery's own docs state its macOS build is broken on Xcode SDK
       # >= 16.3; macos-14 runners ship multiple Xcode versions side by side.
@@ -128,11 +94,11 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Restore native osquery build cache
+      - name: Restore osquery source + native build cache
         uses: actions/cache@v4
         with:
-          path: build/osquery
-          key: build-osquery-macos-${{ hashFiles('.gitmodules', 'osquery-sys/build.rs') }}
+          path: target/osquery-sys
+          key: osquery-sys-macos-${{ hashFiles('osquery-sys/build.rs') }}
 
       - name: cargo build
         run: cargo build --workspace
@@ -146,31 +112,12 @@ jobs:
     timeout-minutes: 240
     steps:
       - name: Enable long paths in git
-        # Belt-and-suspenders alongside disabling OSQUERY_BUILD_AWS (which
-        # removed the worst offender): osquery's own Windows build docs
-        # note path-length issues are a known concern on this platform.
+        # osquery's own Windows build docs note path-length issues are a
+        # known concern on this platform; belt-and-suspenders alongside
+        # disabling OSQUERY_BUILD_AWS (which removed the worst offender).
         run: git config --global core.longpaths true
 
       - uses: actions/checkout@v4
-
-      - name: Restore vendored osquery submodule cache
-        uses: actions/cache@v4
-        with:
-          path: vendor/osquery
-          key: vendor-osquery-windows-${{ hashFiles('.gitmodules') }}
-
-      - name: Fetch osquery submodule (top-level only)
-        # NOT --recursive: osquery's own CMake configure step lazily fetches
-        # each nested third-party submodule on demand, per-platform, via its
-        # importSourceSubmodule()/initializeGitSubmodule() mechanism (see
-        # libraries/cmake/source/modules/utils.cmake) -- exactly what
-        # happened during local verification, without ever running a
-        # blanket recursive fetch ourselves. Fetching everything recursively
-        # upfront pulls in platform-irrelevant content too (e.g. Linux-only
-        # libdevmapper/libcryptsetup), which broke Windows outright: some of
-        # that content hits Windows path-length limits and at least one
-        # reserved device name (a file literally called `aux.sh`).
-        run: git submodule update --init
 
       # winflexbison3 provides win_flex/win_bison; osquery's CMake looks for
       # plain flex/bison names, so alias them. Unverified whether this (or
@@ -192,11 +139,11 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Restore native osquery build cache
+      - name: Restore osquery source + native build cache
         uses: actions/cache@v4
         with:
-          path: build/osquery
-          key: build-osquery-windows-${{ hashFiles('.gitmodules', 'osquery-sys/build.rs') }}
+          path: target/osquery-sys
+          key: osquery-sys-windows-${{ hashFiles('osquery-sys/build.rs') }}
 
       - name: cargo build
         run: cargo build --workspace

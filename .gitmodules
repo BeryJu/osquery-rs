@@ -1,3 +1,0 @@
-[submodule "osquery"]
-	path = vendor/osquery
-	url = https://github.com/osquery/osquery.git

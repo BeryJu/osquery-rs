@@ -1,22 +1,27 @@
-//! Builds the vendored osquery tree (as its own top-level CMake project,
-//! exactly as osquery's own docs describe -- NOT wrapped via
-//! `add_subdirectory()`, since osquery's CMakeLists.txt assumes it IS the
-//! top-level project via `CMAKE_SOURCE_DIR`-relative includes), then
-//! harvests the real, fully-resolved link line CMake generated for the
-//! `osqueryd` executable target.
+//! Fetches osquery's pinned release tag (shallow git clone, no vendored
+//! submodule required -- this crate is meant to be usable as a normal
+//! `cargo add`ed dependency, not just from inside this workspace), builds
+//! it (as its own top-level CMake project, exactly as osquery's own docs
+//! describe -- NOT wrapped via `add_subdirectory()`, since osquery's
+//! CMakeLists.txt assumes it IS the top-level project via
+//! `CMAKE_SOURCE_DIR`-relative includes), then harvests the real,
+//! fully-resolved link line CMake generated for the `osqueryd` executable
+//! target.
 //!
 //! That link line already contains, in the correct order, every third-party
 //! and osquery-internal static library `osqueryd` needs -- including the
-//! `-Wl,--whole-archive`/`-force_load` sequences osquery's own
-//! `enableLinkWholeArchive()` CMake helper already applies to every
+//! `-Wl,--whole-archive`/`-force_load`/`/WHOLEARCHIVE:` sequences osquery's
+//! own `enableLinkWholeArchive()` CMake helper already applies to every
 //! table/plugin target that registers itself via static initializers. We
-//! reuse it verbatim, with one exception: the single archive built from
-//! `osquery/main/{main,posix/main}.cpp` (the `osquery_main` target) is
-//! dropped, because that's the one translation unit that defines the
-//! process's real `main()`/`wmain()` -- linking it would collide with the
-//! Rust binary's own entry point. Everything else in `osquery_main`'s
-//! dependency graph is a leaf library with no competing `main`, so dropping
-//! only that one archive is safe.
+//! classify each surviving token into a `LinkItem` and emit it via
+//! `cargo:rustc-link-lib`/`cargo:rustc-link-search` (see `emit_link_items`
+//! for why, as opposed to raw `cargo:rustc-link-arg` passthrough), with one
+//! exception: the single archive built from `osquery/main/{main,posix/main}.cpp`
+//! (the `osquery_main` target) is dropped, because that's the one
+//! translation unit that defines the process's real `main()`/`wmain()` --
+//! linking it would collide with the Rust binary's own entry point.
+//! Everything else in `osquery_main`'s dependency graph is a leaf library
+//! with no competing `main`, so dropping only that one archive is safe.
 //!
 //! This is deliberately mechanical (parse CMake's own output) rather than a
 //! hand-maintained list of ~30 target names: the leaf-library set here was
@@ -41,42 +46,41 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Pinned osquery release. Bump deliberately -- this is the single source
+/// of truth for which version gets built (there is no vendored submodule
+/// pin to keep in sync with anymore). Changing it changes the default
+/// source/build cache paths too (see `main`), so a version bump naturally
+/// gets a fresh build rather than reusing a stale cache.
+const OSQUERY_TAG: &str = "5.23.1";
+const OSQUERY_REPO_URL: &str = "https://github.com/osquery/osquery.git";
+
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    let workspace_root = manifest_dir
-        .parent()
-        .expect("osquery-sys manifest dir has no parent")
-        .to_path_buf();
-    let vendor_dir = workspace_root.join("vendor/osquery");
     let shim_dir = manifest_dir.join("shim");
 
-    if !vendor_dir.join("CMakeLists.txt").exists() {
-        panic!(
-            "vendor/osquery is missing or empty at {}. Run \
-             `git submodule update --init --recursive` in the workspace root first.",
-            vendor_dir.display()
-        );
-    }
-
-    // NOTE: local patches (see apply_local_patches) are applied inside
-    // configure_and_build, between the CMake configure and build steps --
-    // NOT here. The patched file (a vendored Boost header) lives inside a
-    // nested submodule that osquery's own CMake configure step fetches
-    // lazily on demand; calling apply_local_patches this early panics with
-    // "No such file or directory" on a fresh checkout, since nothing has
-    // fetched that submodule yet at this point.
-
     // osquery's own build takes a very long time (fetches and compiles
-    // dozens of third-party dependencies plus its own large codebase) and is
-    // NOT something we want to redo inside a fresh OUT_DIR on every cargo
-    // invocation. Persist it in a stable location, overridable for CI.
+    // dozens of third-party dependencies plus its own large codebase) and
+    // is NOT something we want to redo inside a fresh OUT_DIR on every
+    // cargo invocation (OUT_DIR's hash can change across rebuilds). Cache
+    // both the cloned source and the native build in a stable location
+    // inside the *consuming project's* target/ directory -- shared within
+    // that project across incremental rebuilds, respects `cargo clean`,
+    // and doesn't require a shared cross-project cache or any special
+    // repo layout (no sibling `vendor/` directory, no git submodule).
+    let cache_root = cargo_target_dir().join("osquery-sys");
+
+    let src_dir = env::var_os("OSQUERY_SYS_SRC_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| cache_root.join(format!("src-{OSQUERY_TAG}")));
     let build_dir = env::var_os("OSQUERY_SYS_BUILD_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| workspace_root.join("build/osquery"));
+        .unwrap_or_else(|| cache_root.join(format!("build-{OSQUERY_TAG}")));
+
+    ensure_osquery_source(&src_dir);
 
     let osqueryd_path = find_osqueryd(&build_dir);
     if osqueryd_path.is_none() {
-        configure_and_build(&vendor_dir, &build_dir);
+        configure_and_build(&src_dir, &build_dir);
     }
     let osqueryd_path =
         find_osqueryd(&build_dir).expect("osqueryd was not produced by the configured build");
@@ -100,34 +104,19 @@ fn main() {
         .unwrap_or_else(|| panic!("{} has an unexpectedly shallow path", link_txt_path.display()))
         .to_path_buf();
 
-    let mut filtered = filter_link_tokens(&link_line, &osqueryd_path, &link_cwd);
+    let mut items = collect_link_items(&link_line, &osqueryd_path, &link_cwd);
     if cfg!(target_os = "linux") {
-        filtered = adapt_tokens_for_default_linker(filtered, sysroot.as_deref());
+        append_linux_default_linker_items(&mut items, sysroot.as_deref());
     }
-    // Must come after adapt_tokens_for_default_linker (which itself appends
-    // libc++/libc++abi/compiler-rt at the end) so this is truly last --
-    // see compat_stubs.cpp for why it needs to be.
-    filtered.push(
-        compile_compat_stubs(&shim_dir, &cxx_compiler)
-            .to_string_lossy()
-            .into_owned(),
-    );
+    // Must come after append_linux_default_linker_items (which itself
+    // appends libc++/libc++abi/compiler-rt) so this is truly last -- see
+    // compat_stubs.cpp for why it needs to be.
+    items.push(link_item_for_archive(
+        &compile_compat_stubs(&shim_dir, &cxx_compiler),
+        false,
+    ));
 
-    // NOTE: this crate's own targets don't need this list linked (osquery-sys
-    // has no binaries/tests of its own that call into osquery), so we don't
-    // emit it via `cargo:rustc-link-arg` here -- that instruction only
-    // applies to the CURRENT package's own binary/test/example targets, not
-    // to downstream crates that merely depend on this one (see
-    // https://doc.rust-lang.org/cargo/reference/build-scripts.html#rustc-link-arg).
-    // Since the `osquery` crate's test binary (and eventually any
-    // application embedding it) is what actually needs these on its link
-    // line, relay them via the `links`-metadata mechanism instead: emit as
-    // plain `cargo:KEY=VALUE` (not `cargo:rustc-...`), which Cargo exposes to
-    // *direct* dependents' build scripts as `DEP_OSQUERY_EMBED_SHIM_KEY` env
-    // vars (derived from this crate's `links = "osquery_embed_shim"`). The
-    // `osquery` crate's build.rs reads that and re-emits it as its own
-    // `cargo:rustc-link-arg`, which DOES apply to its test/lib consumers.
-    println!("cargo:link_args={}", filtered.join("\u{1f}"));
+    emit_link_items(&items);
 
     // shim.cpp includes osquery/core/flags.h, sql.h, etc., which transitively
     // pull in third-party headers (boost, rapidjson, ...) via the same
@@ -142,7 +131,7 @@ fn main() {
 
     compile_shim(
         &shim_dir,
-        &vendor_dir,
+        &src_dir,
         &cxx_compiler,
         sysroot.as_deref(),
         &defines,
@@ -153,18 +142,66 @@ fn main() {
     println!("cargo:rerun-if-changed={}", shim_dir.join("shim.cpp").display());
     println!(
         "cargo:rerun-if-changed={}",
-        workspace_root.join(".gitmodules").display()
+        shim_dir.join("compat_stubs.cpp").display()
     );
 }
 
-/// Applies known local patches to the vendored osquery tree, each
+/// Cargo doesn't expose the workspace/project target directory to build
+/// scripts directly. Derive it from `OUT_DIR`
+/// (`<target>/<profile>/build/<pkg>-<hash>/out`) by walking up 4 ancestors
+/// -- a standard technique other large `-sys` crates use to find a stable,
+/// `cargo clean`-respecting cache location outside the volatile
+/// per-invocation `OUT_DIR` (whose hash can change across rebuilds).
+fn cargo_target_dir() -> PathBuf {
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
+    out_dir
+        .ancestors()
+        .nth(4)
+        .unwrap_or_else(|| {
+            panic!(
+                "OUT_DIR ({}) has an unexpectedly shallow path",
+                out_dir.display()
+            )
+        })
+        .to_path_buf()
+}
+
+/// Clones osquery's pinned tag into `dest` if it isn't already there.
+/// Shallow (`--depth 1`): we only need this exact tag's tree, not history.
+/// Nested third-party submodules (boost, thrift, rocksdb, ...) are NOT
+/// fetched here -- osquery's own CMake configure step fetches each one
+/// lazily, per-platform, as it's actually needed (see
+/// `configure_and_build`; this is also what makes disabling
+/// OSQUERY_BUILD_AWS/BPF/EXPERIMENTS below actually skip their heavy
+/// nested dependencies instead of just skipping the *build* of code
+/// that's already been fetched).
+fn ensure_osquery_source(dest: &Path) {
+    if dest.join("CMakeLists.txt").exists() {
+        return;
+    }
+    let parent = dest
+        .parent()
+        .expect("osquery source destination has no parent directory");
+    fs::create_dir_all(parent)
+        .unwrap_or_else(|e| panic!("failed to create {}: {e}", parent.display()));
+
+    let mut clone = Command::new("git");
+    clone
+        .arg("clone")
+        .arg("--branch")
+        .arg(OSQUERY_TAG)
+        .arg("--depth")
+        .arg("1")
+        .arg(OSQUERY_REPO_URL)
+        .arg(dest);
+    run(&mut clone, "git clone osquery");
+}
+
+/// Applies known local patches to the freshly cloned osquery tree, each
 /// idempotent (checks for a marker before touching the file) so re-running
-/// build.rs never double-patches. Patch the file content directly in Rust
-/// rather than shelling out to `git apply`/`patch`: it's one small, known
-/// change, and avoids depending on an external tool being present/behaving
-/// identically across Linux/macOS/Windows.
-fn apply_local_patches(vendor_dir: &Path) {
-    patch_boost_mpl_enum_constexpr_conversion(vendor_dir);
+/// build.rs never double-patches.
+fn apply_local_patches(src_dir: &Path) {
+    patch_boost_mpl_enum_constexpr_conversion(src_dir);
 }
 
 /// Boost.MPL's integral_wrapper.hpp computes value+1/value-1 for every
@@ -177,8 +214,8 @@ fn apply_local_patches(vendor_dir: &Path) {
 /// hit it. Silence the diagnostic around the two spots that trigger it,
 /// rather than patching the generic arithmetic (this header is shared by
 /// many wrapper types).
-fn patch_boost_mpl_enum_constexpr_conversion(vendor_dir: &Path) {
-    let path = vendor_dir.join(
+fn patch_boost_mpl_enum_constexpr_conversion(src_dir: &Path) {
+    let path = src_dir.join(
         "libraries/cmake/source/boost/src/libs/mpl/include/boost/mpl/aux_/integral_wrapper.hpp",
     );
     let contents = fs::read_to_string(&path)
@@ -229,13 +266,13 @@ fn find_link_txt(build_dir: &Path, target: &str) -> Option<PathBuf> {
     find_file_in_dir_named(build_dir, &dir_name, "link.txt")
 }
 
-fn configure_and_build(vendor_dir: &Path, build_dir: &Path) {
+fn configure_and_build(src_dir: &Path, build_dir: &Path) {
     fs::create_dir_all(build_dir).expect("failed to create osquery build directory");
 
     let mut configure = Command::new("cmake");
     configure
         .arg("-S")
-        .arg(vendor_dir)
+        .arg(src_dir)
         .arg("-B")
         .arg(build_dir)
         .arg("-DCMAKE_BUILD_TYPE=RelWithDebInfo")
@@ -330,16 +367,11 @@ fn configure_and_build(vendor_dir: &Path, build_dir: &Path) {
 
     run(&mut configure, "cmake configure");
 
-    // vendor/osquery is a git submodule (of a submodule, several levels
-    // deep for its own vendored third-party sources) -- submodules only
-    // record a pinned commit, not working-tree edits, so a local patch
-    // applied by hand to a file under vendor/ does NOT survive a fresh
-    // clone/checkout (including CI); apply it here instead, idempotently,
-    // so a plain `cargo build` is reproducible from scratch. This must run
-    // AFTER configure (which is what lazily fetches the nested submodule
-    // containing the patched file) and BEFORE build (which is what
-    // actually compiles it).
-    apply_local_patches(vendor_dir);
+    // The patched file (a vendored Boost header) lives inside a nested
+    // submodule that only gets fetched by the CMake configure step's own
+    // lazy submodule mechanism -- must run after configure, before build
+    // (which is what actually compiles it).
+    apply_local_patches(src_dir);
 
     let mut build = Command::new("cmake");
     build
@@ -400,42 +432,135 @@ fn read_cmake_cache_compiler(build_dir: &Path) -> (PathBuf, Option<PathBuf>) {
         }
     }
 
-    (
-        compiler.unwrap_or_else(|| PathBuf::from("c++")),
-        sysroot,
-    )
+    (compiler.unwrap_or_else(|| PathBuf::from("c++")), sysroot)
 }
 
-/// Strips the compiler/linker invocation, the output-file flag, all object
+/// A single library reference destined for `cargo:rustc-link-lib`/
+/// `cargo:rustc-link-search`. Unlike `cargo:rustc-link-arg`, both of those
+/// propagate transitively through the *entire* dependency graph regardless
+/// of depth -- see `emit_link_items` -- which is what makes an arbitrary
+/// downstream application depending on the `osquery` crate link correctly
+/// with zero build.rs code of its own.
+enum LinkItem {
+    /// A real static archive with a resolvable directory (osquery's own
+    /// build output, or a file we compiled/located ourselves).
+    StaticLib {
+        dir: PathBuf,
+        name: String,
+        whole_archive: bool,
+    },
+    /// A system/dynamic library referenced by bare name (Unix `-lNAME`, or
+    /// a Windows import library with no directory component).
+    Dylib(String),
+    /// macOS `-framework NAME` (`-weak_framework NAME` is folded into this
+    /// too, losing its "weak"/optional-at-runtime semantics -- there's no
+    /// stable Cargo modifier for that yet; an acceptable behavior change
+    /// for the one framework reference (OSLog) that used it, since it
+    /// isn't something SQL queries call into).
+    Framework(String),
+}
+
+/// Emits every collected `LinkItem` as `cargo:rustc-link-lib`/
+/// `cargo:rustc-link-search`. These (unlike `cargo:rustc-link-arg`, which
+/// only applies to the *emitting* crate's own binary/test/example targets)
+/// are documented to propagate through the whole dependency graph to any
+/// depth: a final application several crates downstream of `osquery-sys`
+/// picks these up automatically. Order matters for plain (non-whole-archive)
+/// static libraries under GNU ld's single-pass symbol resolution; Cargo
+/// places one crate's own rustc-link-lib/-search directives on the linker
+/// command line in the order the build script printed them, and every item
+/// here comes from this one crate's build script, so the order we computed
+/// while parsing osquery's own link.txt is preserved exactly.
+fn emit_link_items(items: &[LinkItem]) {
+    for item in items {
+        match item {
+            LinkItem::StaticLib {
+                dir,
+                name,
+                whole_archive,
+            } => {
+                println!("cargo:rustc-link-search=native={}", dir.display());
+                if *whole_archive {
+                    println!("cargo:rustc-link-lib=static:+whole-archive={name}");
+                } else {
+                    println!("cargo:rustc-link-lib=static={name}");
+                }
+            }
+            LinkItem::Dylib(name) => {
+                println!("cargo:rustc-link-lib=dylib={name}");
+            }
+            LinkItem::Framework(name) => {
+                println!("cargo:rustc-link-lib=framework={name}");
+            }
+        }
+    }
+}
+
+fn link_item_for_archive(path: &Path, whole_archive: bool) -> LinkItem {
+    let dir = path
+        .parent()
+        .unwrap_or_else(|| panic!("archive path has no parent directory: {}", path.display()))
+        .to_path_buf();
+    let name = archive_bare_name(path);
+    LinkItem::StaticLib {
+        dir,
+        name,
+        whole_archive,
+    }
+}
+
+/// Strips the platform-conventional archive decoration from a path's file
+/// name: `lib<name>.a` -> `<name>` on Unix, `<name>.lib` -> `<name>` on
+/// Windows (MSVC doesn't use a `lib` prefix) -- the bare form
+/// `cargo:rustc-link-lib` expects.
+fn archive_bare_name(path: &Path) -> String {
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_else(|| panic!("archive path has no file name: {}", path.display()));
+    if cfg!(windows) {
+        file_name.trim_end_matches(".lib").to_string()
+    } else {
+        file_name
+            .strip_prefix("lib")
+            .unwrap_or(file_name)
+            .trim_end_matches(".a")
+            .to_string()
+    }
+}
+
+/// Walks osquery's own CMake-generated link line for the `osqueryd` target
+/// and classifies every surviving token into a `LinkItem`. Strips the
+/// compiler/linker invocation itself, the output-file flag, all object
 /// files, and the one archive containing osquery_main's competing
-/// `main()`/`wmain()`, keeping every other token (library archives, `-l`,
-/// `-L`, `-framework`, `-Wl,--whole-archive`/`--no-whole-archive`/
-/// `-force_load`/`/WHOLEARCHIVE:`, etc.) in the original order. Non-flag
-/// tokens (archive paths) that are relative are resolved against
-/// `link_cwd` -- CMake generates most of them relative to the directory it
-/// originally ran the link command from, which is not where cargo will
-/// eventually invoke the linker from.
+/// `main()`/`wmain()` (see module doc comment for why). A small set of
+/// flags with no lib/search equivalent that don't affect functional
+/// correctness (compile-flag echoes like `-O2`/`-DNDEBUG`, meaningless at
+/// the link step; cosmetic/hardening-only linker flags) are silently
+/// dropped; anything else unrecognized is dropped too but with a
+/// `cargo:warning`, in case a future osquery version introduces a new kind
+/// of reference we haven't seen and this crate needs updating for.
 ///
-/// Handles both GNU-style (Unix Makefiles: `-o <path>`, `.o`, `.a`) and
+/// Handles both GNU-style (Unix Makefiles: `-o <path>`, `.o`, `.a`,
+/// `-Wl,--whole-archive`/`--no-whole-archive` as a start/end pair) and
 /// MSVC-style (NMake Makefiles: `/OUT:<path>`, `.obj`, `.lib`,
-/// `/WHOLEARCHIVE:<path>` as a single combined token) link-line syntax.
-/// MSVC link commands can also reference a `@<file>.rsp` response file
-/// instead of listing everything inline (a real possibility for a
+/// `/WHOLEARCHIVE:<path>` as a single self-contained token) link-line
+/// syntax. MSVC link commands can also reference a `@<file>.rsp` response
+/// file instead of listing everything inline (a real possibility for a
 /// dependency graph this large, given Windows' command-line length
 /// limits) -- expanded transparently before the main token walk.
-fn filter_link_tokens(link_line: &str, osqueryd_path: &Path, link_cwd: &Path) -> Vec<String> {
+fn collect_link_items(link_line: &str, osqueryd_path: &Path, link_cwd: &Path) -> Vec<LinkItem> {
     let tokens = expand_response_files(
         link_line.split_whitespace().map(str::to_string).collect(),
         link_cwd,
     );
-    let mut out = Vec::new();
-    let mut i = 0;
-    // token 0 is the compiler/linker driver itself.
-    if !tokens.is_empty() {
-        i = 1;
-    }
+    let mut items = Vec::new();
+    let mut i = if tokens.is_empty() { 0 } else { 1 }; // token 0 is the driver itself
+    let mut whole_archive = false;
+
     while i < tokens.len() {
         let tok = tokens[i].as_str();
+
         if cfg!(windows) {
             if tok.starts_with("/OUT:") {
                 i += 1;
@@ -451,7 +576,13 @@ fn filter_link_tokens(link_line: &str, osqueryd_path: &Path, link_cwd: &Path) ->
             }
             if let Some(rest) = tok.strip_prefix("/WHOLEARCHIVE:") {
                 let resolved = resolve_token_path(rest, link_cwd);
-                out.push(format!("/WHOLEARCHIVE:{resolved}"));
+                items.push(link_item_for_archive(Path::new(&resolved), true));
+                i += 1;
+                continue;
+            }
+            if tok.ends_with(".lib") {
+                let resolved = resolve_token_path(tok, link_cwd);
+                items.push(classify_archive_or_dylib(Path::new(&resolved)));
                 i += 1;
                 continue;
             }
@@ -464,31 +595,121 @@ fn filter_link_tokens(link_line: &str, osqueryd_path: &Path, link_cwd: &Path) ->
                 i += 1;
                 continue;
             }
+            if tok == "-Wl,--whole-archive" {
+                whole_archive = true;
+                i += 1;
+                continue;
+            }
+            if tok == "-Wl,--no-whole-archive" {
+                whole_archive = false;
+                i += 1;
+                continue;
+            }
             if tok.ends_with(".a") && is_osquery_main_archive(tok) {
                 i += 1;
                 continue;
             }
-            // Two-token flags whose second token is a bare name (arch,
-            // framework name, ...), NOT a path -- must be passed through
-            // unresolved. Missing this for `-arch` caused
-            // `resolve_token_path` to "helpfully" treat a bare `arm64` as
-            // a relative path and mangle it into
-            // `<link_cwd>/arm64`, which clang then rejected as an invalid
-            // arch name. ld64 (macOS) uses many of these; Linux's ld
-            // doesn't take `-arch`/`-framework` at all, so this is a
-            // no-op there regardless of the OS check being unconditional.
-            if matches!(tok, "-arch" | "-framework" | "-weak_framework") && i + 1 < tokens.len() {
-                out.push(tok.to_string());
-                out.push(tokens[i + 1].clone());
+            if tok.ends_with(".a") {
+                let resolved = resolve_token_path(tok, link_cwd);
+                items.push(link_item_for_archive(Path::new(&resolved), whole_archive));
+                i += 1;
+                continue;
+            }
+            // `-stdlib=libc++` is always redundant: on macOS, rustc's own
+            // default link already includes a plain `-lc++` that covers
+            // it; on Linux it's replaced below by an explicit path to the
+            // osquery-toolchain's own libc++.a (see
+            // append_linux_default_linker_items for why a plain `-lc++`
+            // doesn't work there).
+            if tok == "-stdlib=libc++" {
+                i += 1;
+                continue;
+            }
+            // `-lc++abi` similarly needs Linux-specific handling (no
+            // system libc++abi there, replaced by an explicit archive
+            // path) but resolves fine via the default dynamic linker
+            // search on macOS, where it's left as a normal Dylib item
+            // below (proven working during local/CI verification).
+            if tok == "-lc++abi" && cfg!(target_os = "linux") {
+                i += 1;
+                continue;
+            }
+            if let Some(name) = tok.strip_prefix("-l") {
+                items.push(LinkItem::Dylib(name.to_string()));
+                i += 1;
+                continue;
+            }
+            // Two-token flags whose second token is a bare name (framework
+            // name, arch name, ...), not a path.
+            if matches!(tok, "-framework" | "-weak_framework") && i + 1 < tokens.len() {
+                items.push(LinkItem::Framework(tokens[i + 1].clone()));
+                i += 2;
+                continue;
+            }
+            if tok == "-arch" && i + 1 < tokens.len() {
+                // Dropped, not converted: rustc's own default link
+                // invocation already passes the correct `-arch
+                // <target-arch>` for the Cargo target being built. There's
+                // no Cargo-native equivalent for a bare compiler flag like
+                // this, and none is needed since it would just repeat what
+                // rustc already supplies.
                 i += 2;
                 continue;
             }
         }
+
         let _ = osqueryd_path; // reserved for future path-based filtering
-        out.push(resolve_token_path(tok, link_cwd));
+        if !is_known_droppable_flag(tok) {
+            println!(
+                "cargo:warning=osquery-sys: dropping unrecognized link token `{tok}` \
+                 (no rustc-link-lib/-search equivalent; if the final binary fails to \
+                 link or crashes at runtime, this token may need explicit handling)"
+            );
+        }
         i += 1;
     }
-    out
+    items
+}
+
+/// Classifies a resolved `.lib`/`.a` path: a directory-qualified path is a
+/// real static archive; a bare file name with no directory (as Windows
+/// system import libraries like `kernel32.lib`/`ws2_32.lib` can appear)
+/// is a dynamic/system library reference instead.
+fn classify_archive_or_dylib(path: &Path) -> LinkItem {
+    let has_dir = path
+        .parent()
+        .map(|p| !p.as_os_str().is_empty())
+        .unwrap_or(false);
+    if has_dir {
+        link_item_for_archive(path, false)
+    } else {
+        LinkItem::Dylib(archive_bare_name(path))
+    }
+}
+
+/// Flags known to have no `cargo:rustc-link-lib`/`-search` equivalent and
+/// to not affect the final binary's functional correctness: compile-flag
+/// echoes (meaningless at the link step, since nothing is being compiled
+/// there) and cosmetic/hardening-only linker flags. Each entry here was
+/// directly observed in a real captured link line during development;
+/// this is deliberately conservative (only flags we have evidence are
+/// safe) rather than an attempt to allowlist every conceivable flag --
+/// anything not listed here falls through to a `cargo:warning` instead of
+/// being silently assumed safe.
+fn is_known_droppable_flag(tok: &str) -> bool {
+    matches!(
+        tok,
+        "-DNDEBUG"
+            | "-pthread"
+            | "-Wl,-z,relro,-z,now"
+            | "-Wl,--build-id=sha1"
+            | "-fPIE"
+            | "-pie"
+    ) || tok.starts_with("-O")
+        || tok.starts_with("-g")
+        || tok.starts_with("-mmacosx-version-min=")
+        || tok.starts_with("--sysroot=")
+        || tok == "--no-undefined"
 }
 
 /// Expands any `@<file>` response-file reference tokens by reading the
@@ -505,8 +726,9 @@ fn expand_response_files(tokens: Vec<String>, link_cwd: &Path) -> Vec<String> {
             } else {
                 link_cwd.join(rsp_path)
             };
-            let contents = fs::read_to_string(&resolved)
-                .unwrap_or_else(|e| panic!("failed to read response file {}: {e}", resolved.display()));
+            let contents = fs::read_to_string(&resolved).unwrap_or_else(|e| {
+                panic!("failed to read response file {}: {e}", resolved.display())
+            });
             let expanded = shlex::split(&contents)
                 .unwrap_or_else(|| panic!("failed to parse response file {}", resolved.display()));
             out.extend(expand_response_files(expanded, link_cwd));
@@ -530,18 +752,18 @@ fn resolve_token_path(tok: &str, link_cwd: &Path) -> String {
 }
 
 /// osquery's own link.txt is written for the osquery-toolchain's clang++
-/// driver (e.g. `-stdlib=libc++`, bare `--no-undefined`, `--sysroot=...`).
-/// We deliberately do NOT force rustc to use that clang++ as its own linker
-/// driver globally (via .cargo/config.toml) -- that broke linking for every
-/// unrelated build-script/proc-macro binary in the workspace, since the
-/// osquery-toolchain sysroot lacks the system's own gcc runtime bits (e.g.
-/// `-lgcc_s`) that all those other, unrelated links still need. Instead,
-/// keep the default system linker driver for everything and translate the
-/// handful of clang/toolchain-only pieces to ones that work with the
-/// system's real glibc/gcc:
-/// - `-stdlib=libc++` (a driver convenience flag with no GCC equivalent) and
-///   the plain `-lc++abi` token become explicit absolute paths to the
-///   toolchain's libc++/libc++abi archives -- NOT `-lc++`/`-lc++abi` plus an
+/// driver. We deliberately do NOT force rustc to use that clang++ as its
+/// own linker driver globally (via .cargo/config.toml) -- that broke
+/// linking for every unrelated build-script/proc-macro binary in the
+/// workspace, since the osquery-toolchain sysroot lacks the system's own
+/// gcc runtime bits (e.g. `-lgcc_s`) that all those other, unrelated links
+/// still need. Instead, keep the default system linker driver for
+/// everything and append what it actually needs in place of what
+/// `collect_link_items` already dropped (`-stdlib=libc++`, `-lc++abi`,
+/// `--sysroot=...`, `--no-undefined`):
+///
+/// - libc++/libc++abi are referenced by exact path to the osquery-toolchain's
+///   own archives -- NOT via a `-lc++`/`-lc++abi` dylib reference plus an
 ///   added `-L` to the toolchain's lib dir, because that directory also
 ///   contains the toolchain's own (CentOS7-targeted, per
 ///   `OSQUERY_BUILD_DISTRO="centos7"` in its CXX_DEFINES) `libpthread`
@@ -549,76 +771,49 @@ fn resolve_token_path(tok: &str, link_cwd: &Path) -> String {
 ///   exist on this (Ubuntu, non-multilib) system. Adding that directory to
 ///   the search path let `-lpthread` resolve to that broken stub instead of
 ///   the system's real libpthread. Referencing libc++/libc++abi by exact
-///   path sidesteps the whole-directory search entirely. They're also
-///   moved to the very END of the link line (not left in their original,
-///   early position) -- GNU ld processes static archives in one left-to-
-///   right pass, only pulling in members that resolve an outstanding
-///   undefined symbol at that point; with libc++/libc++abi listed before
-///   the hundreds of osquery/third-party archives that actually reference
+///   path sidesteps the whole-directory search entirely. They're appended
+///   at the very END of the item list (not left in whatever position they'd
+///   have had) -- GNU ld processes static archives in one left-to-right
+///   pass, only pulling in members that resolve an outstanding undefined
+///   symbol at that point; with libc++/libc++abi positioned before the
+///   hundreds of osquery/third-party archives that actually reference
 ///   `operator new`/`operator delete`/`vtable for __cxxabiv1::...`/etc.,
 ///   nothing had asked for those symbols yet and they were silently
 ///   dropped, surfacing as undefined references much later.
-/// - bare `--no-undefined` is dropped entirely rather than translated to
-///   `-Wl,--no-undefined`: osquery's own build uses it because everything
-///   in *that* link consistently comes from the same toolchain/sysroot, so
-///   strict undefined-symbol checking at link time is meaningful there. In
-///   our mixed link (toolchain-compiled osquery objects against the host's
-///   real system glibc), strict checking surfaced glibc symbol-versioning
-///   noise (`__stack_chk_guard@@GLIBC_2.17`) that resolves fine at runtime
-///   through the system's actual dynamic linker/libc -- this is exactly
-///   the kind of forward-compatible resolution symbol versioning exists
-///   for, and it isn't something we need link-time strictness to police
-///   for a final executable (as opposed to a shared library).
-/// - `--sysroot=<toolchain>` is dropped entirely: it would redirect `-lc`/
-///   `-lgcc_s`/etc. resolution into the toolchain's bundled (older) glibc
-///   instead of the system glibc that Rust's own std library was actually
-///   linked against, which produced real symbol-version mismatches
-///   (`undefined reference to '__stack_chk_guard@@GLIBC_2.17'`) when tried.
-fn adapt_tokens_for_default_linker(tokens: Vec<String>, sysroot: Option<&Path>) -> Vec<String> {
+/// - `-lc`/`-lresolv`: rustc's own default link args put `-lc` (libc.so)
+///   early, before any of the whole-archive osquery objects that reference
+///   versioned glibc symbols (e.g. `__stack_chk_guard@@GLIBC_2.17`, from
+///   the osquery toolchain targeting an older glibc ABI baseline).
+///   Ensuring `-lc` is (re-)emitted at the very end fixed an otherwise-
+///   inexplicable "undefined reference ... DSO missing from command line"
+///   -- a known GNU ld quirk with versioned-symbol resolution and link-line
+///   ordering. `-lresolv` (needed for `__res_close`, used by the
+///   dns_resolvers table) has the same problem on Linux specifically: with
+///   `-Wl,--as-needed` in effect, a shared library processed before
+///   anything references its symbols can get dropped from the NEEDED list
+///   entirely. (macOS's own link line also references `-lresolv`, but in
+///   a position that's verified working there already, so it's left
+///   untouched by `collect_link_items` and not touched here.)
+fn append_linux_default_linker_items(items: &mut Vec<LinkItem>, sysroot: Option<&Path>) {
     let sysroot = sysroot.expect("OSQUERY_TOOLCHAIN_SYSROOT must be known to adapt link flags");
-    let libcxx = sysroot.join("usr/lib/libc++.a").to_string_lossy().into_owned();
-    let libcxxabi = sysroot
-        .join("usr/lib/libc++abi.a")
-        .to_string_lossy()
-        .into_owned();
 
-    let mut out = Vec::with_capacity(tokens.len());
-    for tok in tokens {
-        if tok == "-stdlib=libc++" || tok == "-lc++abi" {
-            // dropped here; re-added at the end, see doc comment above
-        } else if tok == "--no-undefined" {
-            // dropped, see doc comment above
-        } else if tok.starts_with("--sysroot=") {
-            // dropped, see doc comment above
-        } else if tok == "-lresolv" {
-            // dropped here; re-added at the end, see doc comment below --
-            // same `--as-needed` + early-position problem as `-lc`.
-        } else {
-            out.push(tok);
-        }
-    }
-    // rustc's own default link args put `-lc` (libc.so) early, before any
-    // of the whole-archive osquery objects that reference versioned glibc
-    // symbols (e.g. `__stack_chk_guard@@GLIBC_2.17`, from the osquery
-    // toolchain targeting an older glibc ABI baseline). Re-listing `-lc`
-    // at the very end fixed an otherwise-inexplicable "undefined reference
-    // ... DSO missing from command line" -- a known GNU ld quirk with
-    // versioned-symbol resolution and link-line ordering. `-lresolv`
-    // (needed for `__res_close`, used by the dns_resolvers table) has the
-    // same problem: with `-Wl,--as-needed` in effect, a shared library
-    // processed before anything references its symbols can get dropped
-    // from the NEEDED list entirely, so it's re-listed at the end too.
-    out.push("-lc".to_string());
-    out.push("-lresolv".to_string());
-    // libc++/libc++abi belong at the very end too, for the same
-    // archive-ordering reason (see doc comment above).
-    out.push(libcxx);
-    out.push(libcxxabi);
+    move_dylib_to_end(items, "c");
+    move_dylib_to_end(items, "resolv");
+
+    items.push(link_item_for_archive(
+        &sysroot.join("usr/lib/libc++.a"),
+        false,
+    ));
+    items.push(link_item_for_archive(
+        &sysroot.join("usr/lib/libc++abi.a"),
+        false,
+    ));
+
     // Several osquery/third-party objects (OpenSSL's threads_pthread.c,
     // librdkafka, boost, libc++ itself, ...) were compiled by the
-    // toolchain's clang targeting aarch64 "outline atomics" -- calls to
-    // helper functions like `__aarch64_ldadd4_acq_rel`/`__aarch64_cas4_rel`
-    // that dispatch to either LL/SC or LSE instructions at runtime based on
+    // toolchain's clang targeting aarch64/x86_64 "outline atomics" -- calls
+    // to helper functions like `__aarch64_ldadd4_acq_rel`/`__cas4_rel` that
+    // dispatch to either LL/SC or LSE instructions at runtime based on
     // detected CPU support. These aren't GNU libatomic symbols (wrong
     // naming convention entirely); they're LLVM compiler-rt builtins,
     // which clang normally links in automatically but GCC's driver has no
@@ -630,8 +825,23 @@ fn adapt_tokens_for_default_linker(tokens: Vec<String>, sysroot: Option<&Path>) 
             sysroot.display()
         )
     });
-    out.push(builtins.to_string_lossy().into_owned());
-    out
+    items.push(link_item_for_archive(&builtins, false));
+}
+
+/// Removes the first `Dylib(name)` item found (wherever it currently is)
+/// and re-appends it at the end; if no such item exists yet, just appends
+/// it. See `append_linux_default_linker_items` for why late positioning
+/// matters here.
+fn move_dylib_to_end(items: &mut Vec<LinkItem>, name: &str) {
+    if let Some(pos) = items
+        .iter()
+        .position(|item| matches!(item, LinkItem::Dylib(n) if n == name))
+    {
+        let item = items.remove(pos);
+        items.push(item);
+    } else {
+        items.push(LinkItem::Dylib(name.to_string()));
+    }
 }
 
 fn is_osquery_main_archive(token: &str) -> bool {
@@ -651,7 +861,7 @@ fn is_osquery_main_archive(token: &str) -> bool {
 
 fn compile_shim(
     shim_dir: &Path,
-    vendor_dir: &Path,
+    src_dir: &Path,
     cxx_compiler: &Path,
     sysroot: Option<&Path>,
     defines: &[String],
@@ -662,7 +872,7 @@ fn compile_shim(
         .cpp(true)
         .compiler(cxx_compiler)
         .file(shim_dir.join("shim.cpp"))
-        .include(vendor_dir)
+        .include(src_dir)
         .std("c++17");
 
     for define in defines {
@@ -685,7 +895,7 @@ fn compile_shim(
 /// Compiles compat_stubs.cpp into its own tiny static archive, separate
 /// from libosquery_embed_shim.a (see that file's doc comment for why),
 /// returning the resulting archive's path so it can be appended to the end
-/// of the link line explicitly rather than left to Cargo's own (early)
+/// of the link item list explicitly rather than left to Cargo's own (early)
 /// placement.
 fn compile_compat_stubs(shim_dir: &Path, cxx_compiler: &Path) -> PathBuf {
     let mut build = cc::Build::new();

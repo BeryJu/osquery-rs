@@ -6,3 +6,12 @@ members = ["osquery-sys", "osquery"]
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
+repository = "https://github.com/BeryJu/osquery-rs"
+keywords = ["osquery", "sql", "security", "monitoring", "ffi"]
+categories = ["api-bindings", "os"]
+# NOTE: `readme` is deliberately NOT set here. Cargo's workspace-inheritance
+# copies a relative `readme` path verbatim into each member rather than
+# re-anchoring it to that member's own directory, so `readme.workspace =
+# true` here would make every member look for its own `README.md` instead
+# of the shared root one. Each crate sets `readme = "../README.md"`
+# directly instead.
