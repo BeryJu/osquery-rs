@@ -13,15 +13,35 @@ created -- see `osquery/tests/smoke.rs`). This was a substantial
 systems-integration effort, not a quick FFI wrapper -- see "How this
 works" below and the staged-delivery notes there.
 
-**CI** (`.github/workflows/ci.yml`) runs the same build/test on Linux,
-macOS, and Windows. Linux mirrors the verified Docker recipe directly on
-the runner. macOS and Windows are **unverified as of this writing** --
-Windows in particular is new: osquery's own build only documents/tests the
+**Distribution model: prebuilt by default, from-source as an explicit
+fallback.** `cargo add osquery` doesn't build osquery from source on your
+machine -- `osquery-sys/build.rs` downloads a prebuilt archive bundle from
+this repo's GitHub Releases for your target triple, verifies it against a
+checksum baked into the crate's own source, and links against that. The
+from-source path (clone + full native CMake build, which can take hours)
+still exists and is used automatically for any target without a published
+prebuilt bundle, or forced for any target via
+`OSQUERY_SYS_FORCE_SOURCE_BUILD=1`. See "Build requirements" below for the
+full fallback behavior and what's still required even on the prebuilt
+path.
+
+**CI** (`.github/workflows/ci.yml`) exercises the from-source build/test on
+Linux, macOS, and Windows on every push (`OSQUERY_SYS_FORCE_SOURCE_BUILD=1`
+is set there specifically so it keeps testing that path even once real
+prebuilt releases exist). A separate workflow
+(`.github/workflows/release.yml`) builds, packages, and publishes prebuilt
+bundles whenever a version tag is pushed -- see "Release process" below.
+All of this is new and, as of this writing, **unverified against real CI
+runs for large parts of it** -- Windows in particular has needed multiple
+rounds of iteration (osquery's own build only documents/tests the
 multi-config "Visual Studio" CMake generator, which doesn't produce the
-`link.txt`/`flags.make` files this crate's `build.rs` parses to discover
-the link line, so it forces the (untested-by-osquery-upstream) "NMake
-Makefiles" generator instead. Expect both to need iteration against real
-CI runs before they go green.
+`link.txt` this crate's `build.rs` parses on other generators, and even the
+"NMake Makefiles" generator forced instead turned out to skip `link.txt`
+entirely in favor of an inline response-file block embedded in
+`build.make` -- see `find_link_line`/`extract_link_line_from_build_make`
+in `osquery-sys/build.rs`), and the release workflow / manylinux2014
+containerization have not yet been exercised by a real tag push at all.
+Expect iteration.
 
 ## Crates
 
@@ -36,9 +56,49 @@ CI runs before they go green.
 
 This crate has no vendored submodule and no special repo layout
 requirement -- `cargo add osquery` (or a plain path/git dependency) works
-from any project. `osquery-sys/build.rs` shallow-clones osquery's pinned
-release tag (`OSQUERY_TAG` in `osquery-sys/build.rs`, currently `5.23.1`)
-itself the first time it runs, then builds it from source. That build:
+from any project.
+
+### Default path: prebuilt download
+
+For the three published target triples (`x86_64-unknown-linux-gnu`,
+`aarch64-apple-darwin`, `x86_64-pc-windows-msvc`), `osquery-sys/build.rs`
+downloads a prebuilt archive bundle from this repo's GitHub Releases
+(`osquery-sys-<version>-<target>.tar.zst`, one per tagged release -- see
+"Release process" below), verifies its SHA-256 against a hash baked into
+the crate's own committed source (`prebuilt-checksums.v1`, via
+`include_str!` -- the expected hash never comes from the network, so
+compromising only the release asset can't forge a matching one), and links
+against the archives inside it directly. This still requires, even on the
+prebuilt path:
+
+- **network access** at build time (one download, not a multi-hour clone +
+  full native build);
+- **a working C++ compiler** locally (via the `cc` crate) -- the shim
+  (`osquery-sys/shim/`, a few hundred lines) always compiles fresh, locally,
+  every time, rather than being bundled prebuilt itself, both because it's
+  fast and to avoid an ABI mismatch against whatever compiler `cc`
+  auto-detects on your machine;
+- **`git`**, briefly -- the shim's own `#include <osquery/...>` headers
+  still need a real source checkout to resolve against, so build.rs does a
+  lightweight, shallow top-level clone of osquery's pinned tag even on the
+  prebuilt path (seconds, not the hours a full CMake configure+build would
+  take -- that's the actual cost this path exists to skip).
+
+A checksum **mismatch** on a downloaded bundle is a hard build failure with
+no fallback (it can mean tampering or corruption, not just release-infra
+flakiness); a **missing** prebuilt (network/HTTP failure, or no bundle
+published yet for your target) instead prints a loud `cargo:warning` and
+falls back to building from source below. Set
+`OSQUERY_SYS_FORCE_SOURCE_BUILD=1` to skip the prebuilt download attempt
+entirely and always build from source.
+
+### Fallback / opt-out: build from source
+
+Used automatically for any target with no published prebuilt bundle, or
+forced via `OSQUERY_SYS_FORCE_SOURCE_BUILD=1`. `osquery-sys/build.rs`
+shallow-clones osquery's pinned release tag (`OSQUERY_TAG` in
+`osquery-sys/build.rs`, currently `5.23.1`) itself the first time it runs,
+then builds it from source. That build:
 
 - requires `git` and network access at build time (to clone osquery's tag,
   and for osquery's own CMake configure step to lazily fetch whichever of
@@ -50,12 +110,14 @@ itself the first time it runs, then builds it from source. That build:
   supported compiler toolchain;
 - compiles dozens of third-party dependencies plus osquery's own large C++
   codebase, and can take a long time (potentially hours) on first build;
-- is **only validated in this repo via Linux** (see `docker/build.Dockerfile`
-  and below) -- osquery's own docs state its macOS build is broken on Xcode
-  SDK >= 16.3, and this repo was bootstrapped on a host with only newer
-  Xcode versions available, so the macOS path in `osquery-sys/build.rs` is
-  written but unverified locally (it *is* exercised by CI -- see
-  `.github/workflows/ci.yml`).
+- is **only validated end-to-end in this repo via Linux** (see
+  `docker/build.Dockerfile` and below) -- osquery's own docs state its
+  macOS build is broken on Xcode SDK >= 16.3, and this repo was
+  bootstrapped on a host with only newer Xcode versions available, so the
+  macOS path in `osquery-sys/build.rs` is written but unverified locally
+  (it *is* exercised by CI -- see `.github/workflows/ci.yml`, which always
+  forces this path via `OSQUERY_SYS_FORCE_SOURCE_BUILD=1` specifically so
+  it keeps testing it once real prebuilt releases exist).
 
 Both the cloned source and the native build are cached under
 `<cargo target dir>/osquery-sys/{src,build}-<OSQUERY_TAG>/` -- inside the
@@ -128,18 +190,45 @@ by default it looks at `/usr/local/osquery-toolchain`
   requirements" above for the cache path) and run
   `git submodule update --init --recursive -- libs/regex` (or check other
   submodules for the same "empty except `.git`" symptom).
-- `build.rs` defaults `NUM_JOBS`/its build parallelism to `min(cores, 4)`:
+- `build.rs` defaults `NUM_JOBS`/its build parallelism to
+  `min(cores, 4) + 1` unless overridden (e.g. CI sets it explicitly):
   osquery's own docs warn that a fully-parallel build can OOM with under
   ~8GB of memory, which is easy to hit even on many-core machines if
   available memory is constrained (e.g. a capped Docker Desktop VM).
 
 ### Known limitations
 
-- **docs.rs**: builds crates in a network-sandboxed container, so the
-  `git clone` in `build.rs` (and osquery's own CMake-triggered submodule
-  fetches) would fail there, same as many heavy `-sys` crates. Not yet
-  addressed (a `DOCS_RS` env var check to skip the native build and emit
-  stub bindings would be the standard fix, if this becomes a problem).
+- **docs.rs**: builds crates in a network-sandboxed container, so even the
+  prebuilt path's download (and the from-source path's `git clone`/CMake-
+  triggered submodule fetches) would fail there, same as many heavy `-sys`
+  crates. Not yet addressed (a `DOCS_RS` env var check to skip both and
+  emit stub bindings would be the standard fix, if this becomes a problem).
+- **Prebuilt bundles only cover 3 target triples** (see "Default path:
+  prebuilt download" above) -- anything else falls back to a from-source
+  build automatically, with an informational `cargo:warning`.
+
+## Release process (maintainers)
+
+1. Bump `workspace.package.version` **and** the version pinned in
+   `workspace.dependencies.osquery-sys` (both in the root `Cargo.toml` --
+   the latter exists because `cargo publish` needs a real version
+   requirement on that path dependency, not just a path; see the comment
+   there) to the same new value. Commit.
+2. Tag that commit `v<version>` (e.g. `v0.2.0`) and push the tag.
+3. `.github/workflows/release.yml` takes over automatically: builds
+   osquery from source on all 3 platforms, packages each into a prebuilt
+   bundle, uploads them as a **draft** GitHub Release, commits the
+   computed checksums to `osquery-sys/prebuilt-checksums.v1` on `main`,
+   re-downloads and re-verifies every uploaded asset against those same
+   checksums, publishes the release, and finally runs `cargo publish` for
+   both crates -- requires a `CARGO_REGISTRY_TOKEN` repo secret (a
+   crates.io API token with publish rights for both crates) to be
+   configured once, manually, ahead of time.
+4. If anything in step 3 fails partway, fix the issue and re-push the same
+   tag (`git tag -f v<version> && git push -f origin v<version>`) to retry
+   -- the workflow re-derives everything from the current source tree each
+   time and overwrites its own prior draft/checksum entries for that exact
+   version.
 
 ## How this works
 
@@ -215,6 +304,21 @@ by default it looks at `/usr/local/osquery-toolchain`
   hardening flags) are dropped; anything else unrecognized is dropped too
   but with a `cargo:warning`, in case a future osquery version introduces
   something new.
+- **Prebuilt bundles are a frozen snapshot of exactly one from-source
+  build's outputs, not a separate code path**: `OSQUERY_SYS_PACKAGE_DIR`
+  (set only by `release.yml`) copies each `LinkItem::StaticLib`'s real
+  archive into a flat `lib/` directory and writes `manifest.v1` -- a
+  hand-rolled, tab-separated format (deliberately not JSON/serde, to avoid
+  a proc-macro compile-time cost landing on every consumer's first build
+  for a format with no external interop requirement) listing every item in
+  the exact order `emit_link_items` would emit them, plus a header
+  recording the exact compiler/sysroot/defines/includes that build used.
+  Downloading and parsing that manifest (`try_prebuilt`/`parse_manifest`)
+  replays those same `cargo:rustc-link-lib`/`-search` directives and
+  recompiles the shim locally against the recorded flags -- the prebuilt
+  path is not a different mechanism from the from-source one, just a
+  cached, pre-computed answer to "what did `collect_link_items` figure
+  out" for a specific release.
 
 ### Staged delivery
 
@@ -222,8 +326,11 @@ by default it looks at `/usr/local/osquery-toolchain`
    discovers its link line, and produces a working binary that runs a
    hardcoded query end-to-end with zero socket files created, exercised by
    `osquery/tests/smoke.rs` (passing on Linux/aarch64 as of this writing).
-2. **Stage 2**: generalize the query API further (e.g. typed columns),
-   verify on Linux/x86_64 and Windows.
+2. **Stage 2 (in progress)**: prebuilt-artifact distribution (this
+   document's "Default path: prebuilt download" and "Release process"
+   sections) -- implemented, but unverified against a real tag push/release
+   as of this writing. Also: generalize the query API further (e.g. typed
+   columns), get a fully green CI run on all 3 platforms.
 3. **Stage 3**: expose more `Initializer`/config knobs as real usage
    demands.
 
