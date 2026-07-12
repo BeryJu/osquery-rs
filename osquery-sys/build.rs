@@ -43,6 +43,7 @@
 
 use std::env;
 use std::fs;
+use std::ops::Add;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -384,25 +385,37 @@ fn extract_link_line_from_build_make(build_make: &Path) -> Option<String> {
 }
 
 /// Every CMake target we look for by name (`osqueryd`, `osquery_core`) is
-/// defined directly in (or included from) `osquery/CMakeLists.txt`, so its
-/// generated `CMakeFiles/<target>.dir/` always lands at this one consistent
-/// location -- checking it directly (one `is_dir()` stat) avoids the
-/// unbounded recursive walk `find_dir_named` falls back to below. That walk
-/// visits every directory in `build_dir` with no pruning at all, and once
-/// every vendored third-party dependency (boost, thrift, rocksdb,
-/// sleuthkit, openssl, sqlite, ...) is actually compiled, that tree can
-/// have hundreds of thousands of files -- on Linux CI specifically (whose
-/// build produces meaningfully more such files than the macOS/Windows
-/// builds do) this walk alone was slow enough to be indistinguishable from
-/// a genuine hang. The slow path is kept as a fallback purely so this still
-/// works if a future osquery version changes the layout.
+/// defined somewhere under the top-level `osquery/` source directory (never
+/// under `libs/`, `plugins/`, or `specs/`, which hold third-party
+/// dependencies and generated codegen targets instead) -- but NOT
+/// necessarily directly in `osquery/CMakeLists.txt` itself. `osqueryd` is
+/// (`build_dir/osquery/CMakeFiles/osqueryd.dir/`, checked as a fast path
+/// below), but `osquery_core` is actually defined one level deeper, in
+/// `osquery/core/CMakeLists.txt` (`build_dir/osquery/core/CMakeFiles/
+/// osquery_core.dir/`) -- confirmed against osquery 5.23.1's real source
+/// tree after a from-scratch `find_dir_named` fallback search (see below)
+/// silently ate 3+ hours on Linux CI doing an unbounded, unpruned walk
+/// across every vendored third-party dependency (boost, thrift, rocksdb,
+/// sleuthkit, ...) before ever reaching the actual `osquery/core/`
+/// directory it needed. Confirmed via a CI heartbeat: the build.rs process
+/// itself was using ~0% CPU the whole time (i/o-bound directory walking,
+/// not a stuck compiler or OOM) with 14GiB RAM still free.
+///
+/// Fixed two ways: the one hardcoded fast path remains (covers `osqueryd`,
+/// costs one `is_dir()` stat when it doesn't apply), and the fallback walk
+/// is now scoped to `build_dir/osquery/` instead of the entire `build_dir`
+/// -- since every target we ever look up by name lives somewhere in that
+/// subtree, this prunes out every third-party dependency's directory tree
+/// entirely regardless of how deeply a future osquery version nests a
+/// target we search for.
 fn find_target_dir(build_dir: &Path, target: &str) -> Option<PathBuf> {
     let dir_name = format!("{target}.dir");
-    let fast_path = build_dir.join("osquery").join("CMakeFiles").join(&dir_name);
+    let osquery_dir = build_dir.join("osquery");
+    let fast_path = osquery_dir.join("CMakeFiles").join(&dir_name);
     if fast_path.is_dir() {
         return Some(fast_path);
     }
-    find_dir_named(build_dir, &dir_name)
+    find_dir_named(&osquery_dir, &dir_name)
 }
 
 fn find_dir_named(root: &Path, dir_name: &str) -> Option<PathBuf> {
@@ -958,10 +971,8 @@ fn is_known_droppable_flag(tok: &str) -> bool {
 }
 
 /// Expands any `@<file>` response-file reference tokens by reading the
-/// file and shell-word-splitting its content in place of the `@file`
-/// token. MSVC response files don't use exactly POSIX shell quoting, but
-/// `shlex` is a reasonable first approximation for the simple
-/// path/flag-only content these contain.
+/// file and word-splitting its content (see `split_generated_flags`) in
+/// place of the `@file` token.
 fn expand_response_files(tokens: Vec<String>, link_cwd: &Path) -> Vec<String> {
     let mut out = Vec::with_capacity(tokens.len());
     for tok in tokens {
@@ -974,8 +985,7 @@ fn expand_response_files(tokens: Vec<String>, link_cwd: &Path) -> Vec<String> {
             let contents = fs::read_to_string(&resolved).unwrap_or_else(|e| {
                 panic!("failed to read response file {}: {e}", resolved.display())
             });
-            let expanded = shlex::split(&contents)
-                .unwrap_or_else(|| panic!("failed to parse response file {}", resolved.display()));
+            let expanded = split_generated_flags(&contents);
             out.extend(expand_response_files(expanded, link_cwd));
         } else {
             out.push(tok);
@@ -1170,18 +1180,12 @@ fn compile_compat_stubs(shim_dir: &Path, cxx_compiler: &Path) -> PathBuf {
 /// Parses `CXX_DEFINES`/`CXX_INCLUDES` out of a target's CMake-generated
 /// `flags.make` (Makefiles generator), returning each as a standalone
 /// pre-formed compiler flag (e.g. `-DFOO=1`, `-I<path>`, `-isystem`,
-/// `<path>`) in original order, ready to hand to `cc::Build::flag()`.
-///
-/// These lines are written for consumption by `/bin/sh -c "..."` (that's
-/// how `make` invokes the compiler), so they use shell quoting -- e.g.
-/// `-DGFLAGS_DLL_DECLARE_FLAG=""` means "define to the empty string" (the
-/// shell strips the quotes) and `-DOSQUERY_BUILD_DISTRO=\"centos7\"` means
-/// "define to the 8-character string `"centos7"`" (the backslash-escaped
-/// quotes become literal quote characters once the shell unescapes them).
-/// We invoke the compiler directly via `Command`/`cc::Build`, bypassing the
-/// shell entirely, so naive whitespace-splitting would pass those quote
-/// characters through literally and corrupt the values -- must do the same
-/// shell-word unescaping a real shell would.
+/// `<path>`) in original order, ready to hand to `cc::Build::flag()`. See
+/// `split_generated_flags` for how the actual tokenizing differs between
+/// Unix (real `/bin/sh -c` shell-word unescaping, since that's how `make`
+/// invokes the compiler there) and Windows (no shell involved at all --
+/// must NOT unescape backslashes, since those are literal path separators
+/// MSVC's own command-line parser expects unmodified).
 fn read_target_compile_flags(build_dir: &Path, target: &str) -> Option<(Vec<String>, Vec<String>)> {
     let dir = find_target_dir(build_dir, target)?;
     let flags_make = dir.join("flags.make");
@@ -1191,13 +1195,62 @@ fn read_target_compile_flags(build_dir: &Path, target: &str) -> Option<(Vec<Stri
     let mut includes = Vec::new();
     for line in contents.lines() {
         if let Some(v) = line.strip_prefix("CXX_DEFINES = ") {
-            defines = shlex::split(v).unwrap_or_else(|| panic!("failed to parse CXX_DEFINES: {v}"));
+            defines = split_generated_flags(v);
         } else if let Some(v) = line.strip_prefix("CXX_INCLUDES = ") {
-            includes =
-                shlex::split(v).unwrap_or_else(|| panic!("failed to parse CXX_INCLUDES: {v}"));
+            includes = split_generated_flags(v);
         }
     }
     Some((defines, includes))
+}
+
+/// Splits CMake-generated flag/path content (a `flags.make` `CXX_DEFINES`/
+/// `CXX_INCLUDES` line, or a response-file's contents) into tokens.
+///
+/// On non-Windows, these files are written for `/bin/sh -c` consumption
+/// (e.g. `-DGFLAGS_DLL_DECLARE_FLAG=""` meaning "define to the empty
+/// string"), so real POSIX shell-word-splitting via `shlex` is necessary --
+/// naive whitespace-splitting would pass raw quote characters through
+/// literally and corrupt the values.
+///
+/// On Windows, CMake's NMake generator instead writes content for MSVC's
+/// own command-line argument parser (`cl.exe`/`link.exe` invoked directly
+/// via `CreateProcess`, with no intermediate shell involved at all) --
+/// running that through `shlex`'s POSIX rules silently eats every
+/// backslash in every path (`\` is shlex's own escape character), mangling
+/// e.g. `-ID:\a\osquery-rs\...\ns_osquery_core` into a single
+/// run-together `-ID:aosquery-rs...ns_osquery_core` token with no
+/// separators left at all -- this broke every Windows shim compile until
+/// found via a real CI failure. Use a much simpler tokenizer instead: split
+/// on whitespace, respecting double-quoted regions so a token with an
+/// embedded space stays one token, without interpreting backslashes or
+/// stripping quote characters -- MSVC's own parser does that itself once
+/// handed the token unmodified, exactly as CMake intended.
+fn split_generated_flags(s: &str) -> Vec<String> {
+    if !cfg!(windows) {
+        return shlex::split(s)
+            .unwrap_or_else(|| panic!("failed to shell-split generated flags: {s}"));
+    }
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    for c in s.chars() {
+        match c {
+            '"' => {
+                in_quotes = !in_quotes;
+                current.push(c);
+            }
+            c if c.is_whitespace() && !in_quotes => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            c => current.push(c),
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
 }
 
 fn find_file_named(root: &Path, name: &str) -> Option<PathBuf> {
