@@ -11,13 +11,16 @@ set -eux
 sed -i s/mirror.centos.org/vault.centos.org/g /etc/yum.repos.d/*.repo
 sed -i s/^#.*baseurl=http/baseurl=http/g /etc/yum.repos.d/*.repo
 sed -i s/^mirrorlist=http/#mirrorlist=http/g /etc/yum.repos.d/*.repo
-# perl-IPC-Cmd/perl-Data-Dumper: not part of manylinux2014's base perl
-# install, but required by OpenSSL's own `Configure` script (vendored by
-# osquery) -- without these, OpenSSL's own build fails with "Can't locate
-# IPC/Cmd.pm in @INC" before any of osquery's own code even starts
-# compiling.
+# perl-IPC-Cmd/perl-Data-Dumper/perl-Time-Piece: not part of
+# manylinux2014's base perl install, but required by OpenSSL's own
+# `Configure`/generated Makefile (vendored by osquery) -- without these,
+# OpenSSL's own build fails with "Can't locate IPC/Cmd.pm" or "Can't
+# locate Time/Piece.pm" in @INC before any of osquery's own code even
+# starts compiling. Found one at a time via real CI failures; add any
+# further missing modules the same way if OpenSSL's Configure still
+# complains.
 yum install -y git bison flex make ccache curl ca-certificates pkgconfig \
-  perl-IPC-Cmd perl-Data-Dumper
+  perl-IPC-Cmd perl-Data-Dumper perl-Time-Piece
 yum groupinstall -y "Development Tools"
 
 # CentOS 7's stock yum cmake package is 2.8.12 -- far too old for osquery.
