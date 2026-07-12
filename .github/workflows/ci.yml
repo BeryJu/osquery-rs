@@ -5,27 +5,79 @@ on:
     branches: [main]
   pull_request:
 
+env:
+  # This workflow's whole purpose is verifying the from-source build path
+  # keeps working -- without this, once a real release exists and
+  # prebuilt-checksums.v1 has entries, every job here would silently take
+  # the (much faster, much less thoroughly exercised by CI) prebuilt
+  # download path instead, and this workflow would stop actually testing
+  # what it's meant to. See osquery-sys/build.rs's try_prebuilt.
+  OSQUERY_SYS_FORCE_SOURCE_BUILD: "1"
+
 jobs:
   linux:
     name: Linux (x86_64)
     runs-on: ubuntu-latest
+    # Runs the whole job inside a manylinux2014 (CentOS 7, glibc 2.17)
+    # container rather than directly on the bare ubuntu-latest runner, so
+    # this build's *final link* (which dynamically resolves -lc/-lresolv
+    # against whatever the host's own system libc is -- see
+    # append_linux_default_linker_items in osquery-sys/build.rs) gets an
+    # old, portable glibc floor. This matters specifically because of the
+    # prebuilt-artifact distribution model: it's this CI job's own build
+    # that gets uploaded and run on other people's machines, so the glibc
+    # version *this container* provides directly determines the oldest
+    # Linux distro the shipped artifact will work on. Matches osquery's own
+    # upstream toolchain's compatibility target (see
+    # OSQUERY_TOOLCHAIN_SYSROOT below, unrelated -- that's for compiling,
+    # this is for the final link only).
+    container: quay.io/pypa/manylinux2014_x86_64
     timeout-minutes: 240
     steps:
       - uses: actions/checkout@v7
 
       - name: Install build prerequisites
+        # No `sudo` inside the container -- already root, and manylinux
+        # images don't necessarily even have a sudo binary. CentOS 7 is EOL
+        # upstream (mirrorlist.centos.org 404s), so repoint yum at the
+        # community-maintained vault mirror first -- a well-known, standard
+        # fix for this exact class of image, though manylinux2014 may
+        # already have this patched; harmless either way if so.
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            git python3 bison flex make cmake ccache curl ca-certificates \
-            build-essential pkg-config
+          sed -i s/mirror.centos.org/vault.centos.org/g /etc/yum.repos.d/*.repo
+          sed -i s/^#.*baseurl=http/baseurl=http/g /etc/yum.repos.d/*.repo
+          sed -i s/^mirrorlist=http/#mirrorlist=http/g /etc/yum.repos.d/*.repo
+          yum install -y git bison flex make ccache curl ca-certificates pkgconfig
+          yum groupinstall -y "Development Tools"
+
+      - name: Install a modern CMake
+        # CentOS 7's stock yum cmake package is 2.8.12 -- far too old for
+        # osquery. manylinux2014 ships several Python versions under
+        # /opt/python/ specifically for building wheels, but the plain
+        # `cmake` PyPI wheel is a perfectly good source of a modern,
+        # portable prebuilt binary here too; simpler and more reliably
+        # glibc-compatible than trying to compile a newer CMake from source
+        # against this same old base.
+        run: |
+          PYBIN=$(ls -d /opt/python/cp3*-cp3*/bin | sort | tail -1)
+          "$PYBIN/pip" install --quiet cmake
+          ln -sf "$PYBIN/cmake" /usr/local/bin/cmake
+          cmake --version
+
+      - name: Ensure a plain python3 is on PATH
+        # osquery's own CMake configure looks for a bare `python3`;
+        # manylinux2014 only provides versioned paths under /opt/python/.
+        run: |
+          PYBIN=$(ls -d /opt/python/cp3*-cp3*/bin | sort | tail -1)
+          ln -sf "$PYBIN/python3" /usr/local/bin/python3
+          python3 --version
 
       - name: Install osquery-toolchain
         run: |
           set -eux
           curl -fsSL -o /tmp/toolchain.tar.xz \
             "https://github.com/osquery/osquery-toolchain/releases/download/1.3.0/osquery-toolchain-1.3.0-x86_64.tar.xz"
-          sudo tar xf /tmp/toolchain.tar.xz -C /usr/local
+          tar xf /tmp/toolchain.tar.xz -C /usr/local
           rm /tmp/toolchain.tar.xz
 
       - name: Shim xlocale.h into the toolchain sysroot (only if missing)
@@ -40,8 +92,8 @@ jobs:
         # on that older snapshot). See README.md "Known local patches".
         run: |
           if [ ! -f /usr/local/osquery-toolchain/usr/include/xlocale.h ]; then
-            printf '#pragma once\n#include <locale.h>\n' | \
-              sudo tee /usr/local/osquery-toolchain/usr/include/xlocale.h > /dev/null
+            printf '#pragma once\n#include <locale.h>\n' \
+              > /usr/local/osquery-toolchain/usr/include/xlocale.h
           fi
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
