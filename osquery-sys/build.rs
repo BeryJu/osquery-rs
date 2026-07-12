@@ -1343,7 +1343,55 @@ fn collect_link_items(link_line: &str, osqueryd_path: &Path, link_cwd: &Path) ->
         }
         i += 1;
     }
-    items
+    dedupe_static_libs(items)
+}
+
+/// The same static archive can legitimately appear more than once in a
+/// real GNU ld link line (e.g. once whole-archive-wrapped for its static
+/// initializers' registration side effects, once again plainly for normal
+/// symbol resolution) -- harmless for `ld` itself, since re-listing an
+/// archive is a no-op once its members are already pulled in, but rustc
+/// hard-errors ("overriding linking modifiers from command line is not
+/// supported") if the *same* library name is passed to `-l` more than once
+/// with different modifiers (`static` vs `static:+whole-archive`) in one
+/// invocation. Collapse duplicates by name into a single entry, keeping
+/// the *first* occurrence's position (matches the order CMake's own
+/// dependency graph already resolved) and upgrading it to whole_archive if
+/// *any* occurrence requested it -- whole-archive is a strictly stronger
+/// request (pulls in every member instead of only ones satisfying an
+/// already-undefined symbol), so OR-ing across duplicates can only ever
+/// pull in a superset of what plain resolution would have.
+fn dedupe_static_libs(items: Vec<LinkItem>) -> Vec<LinkItem> {
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    let mut out: Vec<LinkItem> = Vec::with_capacity(items.len());
+    for item in items {
+        match item {
+            LinkItem::StaticLib {
+                dir,
+                name,
+                whole_archive,
+            } => {
+                if let Some(&idx) = seen.get(&name) {
+                    if let LinkItem::StaticLib {
+                        whole_archive: existing,
+                        ..
+                    } = &mut out[idx]
+                    {
+                        *existing |= whole_archive;
+                    }
+                } else {
+                    seen.insert(name.clone(), out.len());
+                    out.push(LinkItem::StaticLib {
+                        dir,
+                        name,
+                        whole_archive,
+                    });
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// Classifies a resolved `.lib`/`.a` path: a directory-qualified path is a
@@ -1667,7 +1715,29 @@ fn split_generated_flags(s: &str) -> Vec<String> {
     if !current.is_empty() {
         tokens.push(current);
     }
+
+    // CMake's flags.make uses a bare, unescaped `-DNAME=""` idiom to mean
+    // "define to the empty string" -- on Unix that relies on a real shell
+    // to strip the quotes (see split_generated_flags's own non-Windows
+    // branch above), but no shell is involved here, and MSVC's own
+    // command-line parser does NOT collapse this on its own: confirmed by
+    // a real build failure where GFLAGS_DLL_DECLARE_FLAG (defined exactly
+    // this way) survived as a literal `""` token all the way into
+    // `extern "" bool FLAGS_disable_extensions;` -- `error C2537: '':
+    // illegal linkage specification`, since `extern ""` isn't a valid
+    // language-linkage string. Collapse this one specific, unambiguous
+    // shape ourselves. Deliberately narrow: a *backslash-escaped* quoted
+    // define (`-DNAME=\"value\"`, meaning "the literal quoted string
+    // should survive into the macro value", e.g.
+    // `-DOSQUERY_BUILD_DISTRO=\"10\"`) is a different token shape entirely
+    // and must not be touched here.
     tokens
+        .into_iter()
+        .map(|tok| match tok.strip_prefix("-D").and_then(|rest| rest.strip_suffix("=\"\"")) {
+            Some(name) => format!("-D{name}="),
+            None => tok,
+        })
+        .collect()
 }
 
 fn find_file_named(root: &Path, name: &str) -> Option<PathBuf> {
