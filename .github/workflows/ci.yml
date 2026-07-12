@@ -18,85 +18,9 @@ jobs:
   linux:
     name: Linux (x86_64)
     runs-on: ubuntu-latest
-    # Runs the whole job inside a manylinux2014 (CentOS 7, glibc 2.17)
-    # container rather than directly on the bare ubuntu-latest runner, so
-    # this build's *final link* (which dynamically resolves -lc/-lresolv
-    # against whatever the host's own system libc is -- see
-    # append_linux_default_linker_items in osquery-sys/build.rs) gets an
-    # old, portable glibc floor. This matters specifically because of the
-    # prebuilt-artifact distribution model: it's this CI job's own build
-    # that gets uploaded and run on other people's machines, so the glibc
-    # version *this container* provides directly determines the oldest
-    # Linux distro the shipped artifact will work on. Matches osquery's own
-    # upstream toolchain's compatibility target (see
-    # OSQUERY_TOOLCHAIN_SYSROOT below, unrelated -- that's for compiling,
-    # this is for the final link only).
-    container: quay.io/pypa/manylinux2014_x86_64
     timeout-minutes: 240
     steps:
       - uses: actions/checkout@v7
-
-      - name: Install build prerequisites
-        # No `sudo` inside the container -- already root, and manylinux
-        # images don't necessarily even have a sudo binary. CentOS 7 is EOL
-        # upstream (mirrorlist.centos.org 404s), so repoint yum at the
-        # community-maintained vault mirror first -- a well-known, standard
-        # fix for this exact class of image, though manylinux2014 may
-        # already have this patched; harmless either way if so.
-        run: |
-          sed -i s/mirror.centos.org/vault.centos.org/g /etc/yum.repos.d/*.repo
-          sed -i s/^#.*baseurl=http/baseurl=http/g /etc/yum.repos.d/*.repo
-          sed -i s/^mirrorlist=http/#mirrorlist=http/g /etc/yum.repos.d/*.repo
-          yum install -y git bison flex make ccache curl ca-certificates pkgconfig
-          yum groupinstall -y "Development Tools"
-
-      - name: Install a modern CMake
-        # CentOS 7's stock yum cmake package is 2.8.12 -- far too old for
-        # osquery. manylinux2014 ships several Python versions under
-        # /opt/python/ specifically for building wheels, but the plain
-        # `cmake` PyPI wheel is a perfectly good source of a modern,
-        # portable prebuilt binary here too; simpler and more reliably
-        # glibc-compatible than trying to compile a newer CMake from source
-        # against this same old base.
-        run: |
-          PYBIN=$(ls -d /opt/python/cp3*-cp3*/bin | sort | tail -1)
-          "$PYBIN/pip" install --quiet cmake
-          ln -sf "$PYBIN/cmake" /usr/local/bin/cmake
-          cmake --version
-
-      - name: Ensure a plain python3 is on PATH
-        # osquery's own CMake configure looks for a bare `python3`;
-        # manylinux2014 only provides versioned paths under /opt/python/.
-        run: |
-          PYBIN=$(ls -d /opt/python/cp3*-cp3*/bin | sort | tail -1)
-          ln -sf "$PYBIN/python3" /usr/local/bin/python3
-          python3 --version
-
-      - name: Install osquery-toolchain
-        run: |
-          set -eux
-          curl -fsSL -o /tmp/toolchain.tar.xz \
-            "https://github.com/osquery/osquery-toolchain/releases/download/1.3.0/osquery-toolchain-1.3.0-x86_64.tar.xz"
-          tar xf /tmp/toolchain.tar.xz -C /usr/local
-          rm /tmp/toolchain.tar.xz
-
-      - name: Shim xlocale.h into the toolchain sysroot (only if missing)
-        # osquery vendors augeas, whose gnulib submodule ships a pregenerated
-        # header assuming <xlocale.h> exists; real xlocale.h was removed from
-        # modern glibc years ago. This toolchain release's x86_64 build
-        # ALREADY ships a complete, real xlocale.h (its glibc header
-        # snapshot is old enough to still need it) -- only aarch64's is
-        # missing it. Must check before writing: blindly overwriting
-        # clobbers x86_64's working file with a shim that's circular there
-        # (locale.h itself needs this type before it can finish processing
-        # on that older snapshot). See README.md "Known local patches".
-        run: |
-          if [ ! -f /usr/local/osquery-toolchain/usr/include/xlocale.h ]; then
-            printf '#pragma once\n#include <locale.h>\n' \
-              > /usr/local/osquery-toolchain/usr/include/xlocale.h
-          fi
-
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
 
       - name: Restore osquery source + native build cache
         uses: actions/cache@v6
@@ -108,35 +32,37 @@ jobs:
           path: target/osquery-sys
           key: osquery-sys-linux-${{ hashFiles('osquery-sys/build.rs') }}
 
-      - name: cargo build
-        # -vv makes Cargo forward build.rs's own captured stdout/stderr live
-        # (plain -v only shows compiler invocation lines, not build-script
-        # output) -- this build spawns cmake/git as child processes with
-        # inherited stdio, so their progress only reaches the Actions log
-        # stream at this verbosity. Without it, a genuinely slow multi-hour
-        # native build and a truly stuck one look identical in the log.
+      - name: Build + test inside manylinux2014 (glibc 2.17 floor)
+        # GitHub Actions can't run this job's *own* steps (actions/checkout,
+        # actions/cache, ...) inside a manylinux2014 container via the
+        # job-level `container:` key: Actions injects a Node.js runtime into
+        # the job container to execute its own JS-based steps, and modern
+        # Node requires a far newer glibc than manylinux2014's CentOS-7-era
+        # 2.17. That was tried first and failed at the very first step --
+        # actions/checkout@v7 itself crashed with "GLIBC_2.27/2.28 not
+        # found" errors before any of our own build logic ever ran.
         #
-        # The backgrounded heartbeat loop is diagnostic: a prior Linux run
-        # went completely silent for 60+ minutes with no way to tell
-        # whether the runner itself froze or just the compiler process did.
-        # If it happens again, comparing whether these heartbeat lines kept
-        # appearing (system alive, something else hung) against `free -h`'s
-        # own numbers (memory exhausted at the time it stopped) should
-        # finally give a real answer instead of another guess.
+        # Fix: keep this job on the ordinary ubuntu-latest host (where
+        # GitHub's own Node-based steps work fine) and invoke the
+        # manylinux2014 image manually via `docker run` for only the actual
+        # build+test step. The container's old glibc only needs to be
+        # present for *our* compiler/linker invocations -- specifically the
+        # final link, which dynamically resolves -lc/-lresolv against
+        # whatever the host's own system libc is (see
+        # append_linux_default_linker_items in osquery-sys/build.rs) -- not
+        # for anything Actions itself runs. This matters because of the
+        # prebuilt-artifact distribution model: it's this build's own output
+        # that gets uploaded and run on other people's machines, so the
+        # glibc version *the container* provides directly determines the
+        # oldest Linux distro the shipped artifact will work on.
         run: |
-          ( while true; do
-              sleep 60
-              echo "=== heartbeat $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
-              free -h
-              echo "--- top memory consumers ---"
-              ps -eo pid,ppid,%mem,%cpu,etime,cmd --sort=-%mem | head -15
-            done ) &
-          HEARTBEAT_PID=$!
-          trap 'kill "$HEARTBEAT_PID" 2>/dev/null || true' EXIT
-          cargo build --workspace -vv
-
-      - name: cargo test (integration)
-        run: cargo test -p osquery --features integration-tests -vv -- --nocapture
+          docker run --rm \
+            -v "${{ github.workspace }}:${{ github.workspace }}" \
+            -w "${{ github.workspace }}" \
+            -e OSQUERY_SYS_FORCE_SOURCE_BUILD \
+            quay.io/pypa/manylinux2014_x86_64 \
+            bash .github/scripts/manylinux-entrypoint.sh \
+            bash .github/scripts/linux-cargo-build-test.sh
 
   macos:
     name: macOS (aarch64)

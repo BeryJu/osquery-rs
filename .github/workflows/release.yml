@@ -25,52 +25,9 @@ jobs:
   build-linux:
     name: Build prebuilt bundle (Linux x86_64)
     runs-on: ubuntu-latest
-    # See ci.yml's Linux job for the full reasoning -- same manylinux2014
-    # container, for the same old-glibc final-link floor, since this job's
-    # own build is literally what gets uploaded and run on other people's
-    # machines.
-    container: quay.io/pypa/manylinux2014_x86_64
     timeout-minutes: 240
     steps:
       - uses: actions/checkout@v7
-
-      - name: Install build prerequisites
-        run: |
-          sed -i s/mirror.centos.org/vault.centos.org/g /etc/yum.repos.d/*.repo
-          sed -i s/^#.*baseurl=http/baseurl=http/g /etc/yum.repos.d/*.repo
-          sed -i s/^mirrorlist=http/#mirrorlist=http/g /etc/yum.repos.d/*.repo
-          yum install -y git bison flex make ccache curl ca-certificates pkgconfig
-          yum groupinstall -y "Development Tools"
-
-      - name: Install a modern CMake
-        run: |
-          PYBIN=$(ls -d /opt/python/cp3*-cp3*/bin | sort | tail -1)
-          "$PYBIN/pip" install --quiet cmake
-          ln -sf "$PYBIN/cmake" /usr/local/bin/cmake
-          cmake --version
-
-      - name: Ensure a plain python3 is on PATH
-        run: |
-          PYBIN=$(ls -d /opt/python/cp3*-cp3*/bin | sort | tail -1)
-          ln -sf "$PYBIN/python3" /usr/local/bin/python3
-          python3 --version
-
-      - name: Install osquery-toolchain
-        run: |
-          set -eux
-          curl -fsSL -o /tmp/toolchain.tar.xz \
-            "https://github.com/osquery/osquery-toolchain/releases/download/1.3.0/osquery-toolchain-1.3.0-x86_64.tar.xz"
-          tar xf /tmp/toolchain.tar.xz -C /usr/local
-          rm /tmp/toolchain.tar.xz
-
-      - name: Shim xlocale.h into the toolchain sysroot (only if missing)
-        run: |
-          if [ ! -f /usr/local/osquery-toolchain/usr/include/xlocale.h ]; then
-            printf '#pragma once\n#include <locale.h>\n' \
-              > /usr/local/osquery-toolchain/usr/include/xlocale.h
-          fi
-
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
 
       - name: Restore osquery source + native build cache
         uses: actions/cache@v6
@@ -79,9 +36,25 @@ jobs:
           key: osquery-sys-linux-${{ hashFiles('osquery-sys/build.rs') }}
 
       - name: Build osquery-sys and stage the prebuilt bundle
-        env:
-          OSQUERY_SYS_PACKAGE_DIR: ${{ github.workspace }}/pkg
-        run: cargo build --workspace -vv
+        # See ci.yml's Linux job for why this runs via a manual `docker run`
+        # rather than the job-level `container:` key: GitHub Actions injects
+        # a Node.js runtime into a job-level container to run its own
+        # JS-based steps (actions/checkout, actions/cache, ...), and modern
+        # Node needs a far newer glibc than manylinux2014's CentOS-7-era
+        # 2.17 -- that combination crashes actions/checkout itself, before
+        # any of our own steps run. The container's old glibc only needs to
+        # be present for the actual build/link, not for anything Actions
+        # itself runs -- same reasoning as ci.yml, doubly so here since this
+        # job's own build output is exactly what gets uploaded and shipped
+        # to consumers.
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:${{ github.workspace }}" \
+            -w "${{ github.workspace }}" \
+            -e OSQUERY_SYS_PACKAGE_DIR="${{ github.workspace }}/pkg" \
+            quay.io/pypa/manylinux2014_x86_64 \
+            bash .github/scripts/manylinux-entrypoint.sh \
+            cargo build --workspace -vv
 
       - name: Package and hash the bundle
         shell: bash
