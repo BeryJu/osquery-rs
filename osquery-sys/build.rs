@@ -634,6 +634,7 @@ fn num_jobs() -> String {
         std::thread::available_parallelism()
             .map(|n| n.get().min(4))
             .unwrap_or(4)
+            .add(1)
             .to_string()
     })
 }
