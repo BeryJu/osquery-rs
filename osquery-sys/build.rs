@@ -1420,6 +1420,27 @@ fn dedupe_static_libs(items: Vec<LinkItem>) -> Vec<LinkItem> {
 /// system import libraries like `kernel32.lib`/`ws2_32.lib` can appear)
 /// is a dynamic/system library reference instead.
 fn classify_archive_or_dylib(path: &Path) -> LinkItem {
+    // Windows SDK import libraries (ntdll.lib, ole32.lib, kernel32.lib, and
+    // ~30 others osquery's own link line references this way) are always
+    // written as a bare `name.lib` token with no directory component,
+    // relying on link.exe's own default LIB-environment-variable search
+    // path -- the exact Windows equivalent of Unix's bare `-lname`, which
+    // this file already treats unconditionally as a Dylib with zero path
+    // resolution. But resolve_token_path (needed so *real* build-tree
+    // archives like osquery_core.lib, which really are referenced by a
+    // bare name relative to the link working directory, resolve
+    // correctly) joins ANY non-absolute, non-flag-looking token to
+    // link_cwd -- which fabricates a directory for system import libs too,
+    // making the `has_dir` check below always true and misclassifying
+    // them as StaticLib pointed at a directory that never actually
+    // contains them. The two cases are indistinguishable from the token
+    // text alone; check whether the resolved path actually exists on disk
+    // instead -- a real build-tree archive does, a system import library
+    // never does (link_cwd is never where the Windows SDK's own libs
+    // live).
+    if cfg!(windows) && !path.exists() {
+        return LinkItem::Dylib(archive_bare_name(path));
+    }
     let has_dir = path
         .parent()
         .map(|p| !p.as_os_str().is_empty())
