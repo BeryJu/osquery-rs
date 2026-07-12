@@ -1,0 +1,18 @@
+# osquery-sys prebuilt bundle checksums, schema v1
+#
+# One line per target triple: TARGET<TAB>SHA256_OF_TAR_ZST (64 lowercase hex
+# chars). This file is embedded into the crate itself via include_str! in
+# build.rs, so the expected hash for a downloaded prebuilt bundle always
+# comes from the same crates.io-published source tree as build.rs's own
+# verification logic -- never from the network location serving the bundle
+# itself. See build.rs's prebuilt-download path and NEXT_STEPS.md /
+# .github/workflows/release.yml for how this file gets populated: the
+# release workflow computes each platform's real bundle hash as part of the
+# same build that gets uploaded, then commits the result here before
+# publishing the GitHub Release.
+#
+# Empty (no entries below) until the first tagged release's CI run
+# populates it -- until then, every target falls back to a from-source
+# build with an informational cargo:warning rather than a hard error, since
+# "no prebuilt exists yet for this crate version" isn't a release-process
+# bug, just the initial/pre-release state.

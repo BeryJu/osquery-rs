@@ -41,8 +41,11 @@
 //! against a real Windows build as of this writing; see
 //! `.github/workflows/ci.yml` and iterate there.
 
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
+use std::hash::{Hash, Hasher};
+use std::io::Read;
 use std::ops::Add;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -54,6 +57,34 @@ use std::process::Command;
 /// gets a fresh build rather than reusing a stale cache.
 const OSQUERY_TAG: &str = "5.23.1";
 const OSQUERY_REPO_URL: &str = "https://github.com/osquery/osquery.git";
+
+/// Target triples this crate ships a prebuilt bundle for -- exactly the
+/// three platforms `.github/workflows/release.yml` builds. Anything else
+/// (e.g. `aarch64-unknown-linux-gnu`, `x86_64-apple-darwin`) automatically
+/// routes to the from-source path in `main`, extended by adding a new CI
+/// job and appending its target triple here, nothing else.
+const PREBUILT_TARGETS: &[&str] = &[
+    "x86_64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+];
+
+/// This crate's own repo -- where `release.yml` uploads prebuilt bundles as
+/// GitHub Release assets under tag `v<CARGO_PKG_VERSION>`. Deliberately not
+/// an env-var override: an attacker able to redirect this could serve a
+/// malicious artifact *and* a matching hash together, defeating the whole
+/// point of `PREBUILT_CHECKSUMS` living in the crate's own committed source
+/// instead of being fetched over the network.
+const RELEASE_REPO: &str = "https://github.com/BeryJu/osquery-rs";
+
+/// Expected SHA-256 of each target's prebuilt bundle, baked into the
+/// compiled build script at compile time via `include_str!` -- meaning the
+/// expected hash ships inside the exact same crates.io-published source
+/// tree as the verification code itself, with zero network round-trips to
+/// fetch it. An attacker who compromises only the GitHub Release asset
+/// can't forge a matching entry here. See `prebuilt-checksums.v1` and
+/// `.github/workflows/release.yml` for how this file gets populated.
+const PREBUILT_CHECKSUMS: &str = include_str!("prebuilt-checksums.v1");
 
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
@@ -76,6 +107,26 @@ fn main() {
     let build_dir = env::var_os("OSQUERY_SYS_BUILD_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| cache_root.join(format!("build-{OSQUERY_TAG}")));
+
+    // Default path: download a prebuilt bundle from this repo's GitHub
+    // Releases instead of building osquery from source, which can take
+    // multiple hours. See `try_prebuilt` for the full fallback decision
+    // tree -- this only returns `FallBack` (rather than exiting) when
+    // there's a real reason to fall through to the from-source path below,
+    // logging a `cargo:warning` explaining why in every such case.
+    if env::var_os("OSQUERY_SYS_FORCE_SOURCE_BUILD").is_none() {
+        match try_prebuilt(&cache_root, &src_dir, &shim_dir) {
+            PrebuiltAttempt::Used => return,
+            PrebuiltAttempt::FallBack(reason) => {
+                println!(
+                    "cargo:warning=osquery-sys: {reason} -- falling back to a from-source \
+                     build, which can take multiple hours. Set \
+                     OSQUERY_SYS_FORCE_SOURCE_BUILD=1 to skip the prebuilt download attempt \
+                     entirely on future builds."
+                );
+            }
+        }
+    }
 
     let freshly_cloned = ensure_osquery_source(&src_dir);
 
@@ -114,15 +165,6 @@ fn main() {
     if cfg!(target_os = "linux") {
         append_linux_default_linker_items(&mut items, sysroot.as_deref());
     }
-    // Must come after append_linux_default_linker_items (which itself
-    // appends libc++/libc++abi/compiler-rt) so this is truly last -- see
-    // compat_stubs.cpp for why it needs to be.
-    items.push(link_item_for_archive(
-        &compile_compat_stubs(&shim_dir, &cxx_compiler),
-        false,
-    ));
-
-    emit_link_items(&items);
 
     // shim.cpp includes osquery/core/flags.h, sql.h, etc., which transitively
     // pull in third-party headers (boost, rapidjson, ...) via the same
@@ -134,6 +176,33 @@ fn main() {
     // shim needs.
     let (defines, includes) = read_target_compile_flags(&build_dir, "osquery_core")
         .expect("could not find osquery_core's CMake-generated flags.make");
+
+    // If OSQUERY_SYS_PACKAGE_DIR is set (only ever done by the release CI
+    // workflow), stage a prebuilt bundle from exactly this build's outputs
+    // *before* compat_stubs gets appended below -- a consumer's build.rs
+    // recompiles compat_stubs (and the rest of the shim) fresh locally
+    // every time regardless of whether it took the prebuilt path, so the
+    // packaged manifest shouldn't include it.
+    if let Some(package_dir) = env::var_os("OSQUERY_SYS_PACKAGE_DIR") {
+        stage_prebuilt_package(
+            Path::new(&package_dir),
+            &items,
+            &cxx_compiler,
+            sysroot.as_deref(),
+            &defines,
+            &includes,
+        );
+    }
+
+    // Must come after append_linux_default_linker_items (which itself
+    // appends libc++/libc++abi/compiler-rt) so this is truly last -- see
+    // compat_stubs.cpp for why it needs to be.
+    items.push(link_item_for_archive(
+        &compile_compat_stubs(&shim_dir, &cxx_compiler),
+        false,
+    ));
+
+    emit_link_items(&items);
 
     compile_shim(
         &shim_dir,
@@ -150,6 +219,354 @@ fn main() {
         "cargo:rerun-if-changed={}",
         shim_dir.join("compat_stubs.cpp").display()
     );
+}
+
+enum PrebuiltAttempt {
+    Used,
+    FallBack(String),
+}
+
+/// Attempts the default, fast path: download a prebuilt bundle for the
+/// current target from this repo's GitHub Releases instead of building
+/// osquery from source (which can take multiple hours). Every `FallBack`
+/// case is a deliberate, named condition -- see the summary table:
+///
+/// | Condition                                    | Action                          |
+/// |-----------------------------------------------|--------------------------------|
+/// | `OSQUERY_SYS_FORCE_SOURCE_BUILD` set          | never calls this function at all |
+/// | `TARGET` not in `PREBUILT_TARGETS`            | `FallBack`, informational       |
+/// | No checksum entry for this target yet         | `FallBack`, informational (not a hard error -- see below) |
+/// | Download network/HTTP failure                 | `FallBack`, loud warning         |
+/// | Checksum mismatch                              | hard `panic!`, no fallback       |
+/// | Extraction (`tar`) failure                     | `FallBack`, loud warning         |
+/// | Success                                        | `Used`                          |
+///
+/// The "no checksum entry yet" case deliberately falls back rather than
+/// hard-erroring (unlike a genuine mismatch): `prebuilt-checksums.v1` starts
+/// out with no real entries at all until the first tagged release's CI run
+/// populates it, and hard-erroring every build until then would make the
+/// crate unusable during that bootstrap window -- "no prebuilt published
+/// yet for this version" isn't a release-process bug the way a checksum
+/// mismatch against a *recorded* hash would be.
+fn try_prebuilt(cache_root: &Path, src_dir: &Path, shim_dir: &Path) -> PrebuiltAttempt {
+    let target = env::var("TARGET").expect("TARGET not set by cargo");
+    if !PREBUILT_TARGETS.contains(&target.as_str()) {
+        return PrebuiltAttempt::FallBack(format!("no prebuilt bundle exists for target {target}"));
+    }
+
+    let version = env::var("CARGO_PKG_VERSION").expect("CARGO_PKG_VERSION not set by cargo");
+    let bundle_dir = cache_root.join(format!("prebuilt-{version}-{target}"));
+
+    if !bundle_dir.join("manifest.v1").exists() {
+        if let Err(reason) = download_and_verify_bundle(&target, &version, &bundle_dir) {
+            return PrebuiltAttempt::FallBack(reason);
+        }
+    }
+
+    // The shim's own `#include <osquery/...>` headers still need a real
+    // source checkout to resolve against -- just the lightweight top-level
+    // clone (seconds), not the CMake configure+build of it (hours), which
+    // is the actual cost this path exists to skip.
+    ensure_osquery_source(src_dir);
+
+    let manifest_path = bundle_dir.join("manifest.v1");
+    let manifest_text = fs::read_to_string(&manifest_path)
+        .unwrap_or_else(|e| panic!("failed to read cached {}: {e}", manifest_path.display()));
+    let manifest = parse_manifest(&manifest_text, &bundle_dir);
+
+    let mut items = manifest.items;
+    // Recompiled fresh locally every time, prebuilt path or not -- see
+    // stage_prebuilt_package's own doc comment for why this (and the rest
+    // of the shim) is never itself part of the bundle.
+    items.push(link_item_for_archive(
+        &compile_compat_stubs(shim_dir, &manifest.cxx_compiler),
+        false,
+    ));
+    emit_link_items(&items);
+
+    compile_shim(
+        shim_dir,
+        src_dir,
+        &manifest.cxx_compiler,
+        manifest.sysroot.as_deref(),
+        &manifest.cxx_defines,
+        &manifest.cxx_includes,
+    );
+
+    println!("cargo:rerun-if-changed={}", shim_dir.join("shim.h").display());
+    println!("cargo:rerun-if-changed={}", shim_dir.join("shim.cpp").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        shim_dir.join("compat_stubs.cpp").display()
+    );
+
+    PrebuiltAttempt::Used
+}
+
+/// Downloads, verifies, and extracts the prebuilt bundle for `target` into
+/// `bundle_dir`. Returns `Err(reason)` for anything that should fall back
+/// to a from-source build (network/HTTP failure, extraction failure) --
+/// panics directly instead (no fallback) for a checksum mismatch, which is
+/// a real integrity concern rather than an environment condition. See
+/// `try_prebuilt`'s doc comment for the full reasoning on why these two
+/// failure classes are treated differently.
+fn download_and_verify_bundle(target: &str, version: &str, bundle_dir: &Path) -> Result<(), String> {
+    let checksums = parse_prebuilt_checksums();
+    let Some(expected_hash) = checksums.get(target) else {
+        return Err(format!(
+            "no prebuilt bundle has been published yet for target {target} at version {version}"
+        ));
+    };
+
+    let url = format!(
+        "{RELEASE_REPO}/releases/download/v{version}/osquery-sys-{version}-{target}.tar.zst"
+    );
+    let response = ureq::get(&url)
+        .call()
+        .map_err(|e| format!("failed to download prebuilt bundle from {url}: {e}"))?;
+
+    let mut bytes = Vec::new();
+    response
+        .into_reader()
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("failed to read downloaded bundle from {url}: {e}"))?;
+
+    let actual_hash = sha256_hex(&bytes);
+    if &actual_hash != expected_hash {
+        panic!(
+            "osquery-sys: downloaded prebuilt bundle for {target} does not match its recorded \
+             checksum (expected {expected_hash}, got {actual_hash}) -- refusing to use it. This \
+             could mean a corrupted download, or (much less likely) a compromised release \
+             asset; either way, verify {url} manually before proceeding. Set \
+             OSQUERY_SYS_FORCE_SOURCE_BUILD=1 to build from source instead."
+        );
+    }
+
+    fs::create_dir_all(bundle_dir)
+        .map_err(|e| format!("failed to create {}: {e}", bundle_dir.display()))?;
+
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
+    let archive_path = out_dir.join(format!("osquery-sys-{version}-{target}.tar.zst"));
+    fs::write(&archive_path, &bytes)
+        .map_err(|e| format!("failed to write downloaded bundle to {}: {e}", archive_path.display()))?;
+
+    let mut tar = Command::new("tar");
+    tar.arg("--zstd")
+        .arg("-xf")
+        .arg(&archive_path)
+        .arg("-C")
+        .arg(bundle_dir);
+    let status = tar
+        .status()
+        .map_err(|e| format!("failed to spawn tar to extract prebuilt bundle: {e}"))?;
+    let _ = fs::remove_file(&archive_path);
+    if !status.success() {
+        return Err(format!("tar extraction of prebuilt bundle failed with {status}"));
+    }
+
+    Ok(())
+}
+
+/// Parses the embedded `PREBUILT_CHECKSUMS` (`prebuilt-checksums.v1`) into a
+/// `target -> expected sha256 hex` map. Tab-separated, `#`-prefixed comment
+/// lines ignored -- see that file's own header for the full format
+/// rationale and how it gets populated.
+fn parse_prebuilt_checksums() -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for line in PREBUILT_CHECKSUMS.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut fields = line.split('\t');
+        if let (Some(target), Some(hash)) = (fields.next(), fields.next()) {
+            map.insert(target.to_string(), hash.to_string());
+        }
+    }
+    map
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The parsed contents of a prebuilt bundle's `manifest.v1` -- see
+/// `stage_prebuilt_package` for the exact format this reads, written by the
+/// same build.rs (under `OSQUERY_SYS_PACKAGE_DIR`) that produced the bundle
+/// in the first place.
+struct PrebuiltManifest {
+    cxx_compiler: PathBuf,
+    sysroot: Option<PathBuf>,
+    cxx_defines: Vec<String>,
+    cxx_includes: Vec<String>,
+    items: Vec<LinkItem>,
+}
+
+fn parse_manifest(contents: &str, bundle_dir: &Path) -> PrebuiltManifest {
+    let lib_dir = bundle_dir.join("lib");
+    let mut cxx_compiler = None;
+    let mut sysroot = None;
+    let mut cxx_defines = Vec::new();
+    let mut cxx_includes = Vec::new();
+    let mut items = Vec::new();
+
+    for line in contents.lines() {
+        if let Some(rest) = line.strip_prefix("# cxx_compiler=") {
+            cxx_compiler = Some(PathBuf::from(rest));
+        } else if let Some(rest) = line.strip_prefix("# sysroot=") {
+            if !rest.is_empty() {
+                sysroot = Some(PathBuf::from(rest));
+            }
+        } else if let Some(rest) = line.strip_prefix("# cxx_defines=") {
+            cxx_defines = rest
+                .split('\t')
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect();
+        } else if let Some(rest) = line.strip_prefix("# cxx_includes=") {
+            cxx_includes = rest
+                .split('\t')
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect();
+        } else if line.starts_with('#') || line.trim().is_empty() {
+            continue;
+        } else {
+            let fields: Vec<&str> = line.split('\t').collect();
+            if fields.len() != 3 {
+                panic!("malformed manifest.v1 line (expected 3 tab-separated fields): {line:?}");
+            }
+            let (kind, name, whole_archive_or_dash) = (fields[0], fields[1], fields[2]);
+            let item = match kind {
+                "STATICLIB" => LinkItem::StaticLib {
+                    dir: lib_dir.clone(),
+                    name: name.to_string(),
+                    whole_archive: whole_archive_or_dash == "whole_archive",
+                },
+                "DYLIB" => LinkItem::Dylib(name.to_string()),
+                "FRAMEWORK" => LinkItem::Framework(name.to_string()),
+                other => panic!("unknown manifest.v1 item kind {other:?} in line: {line:?}"),
+            };
+            items.push(item);
+        }
+    }
+
+    PrebuiltManifest {
+        cxx_compiler: cxx_compiler
+            .unwrap_or_else(|| panic!("manifest.v1 missing cxx_compiler header")),
+        sysroot,
+        cxx_defines,
+        cxx_includes,
+        items,
+    }
+}
+
+/// Stages a prebuilt bundle from this build's own already-computed outputs
+/// into `package_dir`, when `OSQUERY_SYS_PACKAGE_DIR` is set (only ever
+/// done by `.github/workflows/release.yml`, never by a normal consumer
+/// build). Copies each `StaticLib` item's real archive file into a flat
+/// `package_dir/lib/` directory and writes `manifest.v1` describing every
+/// item in the exact order `emit_link_items` would emit them (order is
+/// load-bearing -- see that function's own doc comment).
+///
+/// Deliberately does NOT invoke `tar`/compute a checksum/upload anything --
+/// that stays entirely in `release.yml`'s own steps, visible and auditable
+/// there rather than hidden inside a build script side effect. This
+/// function's only job is "materialize a plain directory of files + a
+/// manifest describing them."
+///
+/// Also deliberately does NOT bundle the shim's own compiled archives
+/// (`libosquery_embed_shim.a`, `libosquery_embed_compat_stubs.a`/.lib) --
+/// those get recompiled fresh, locally, on every consumer build regardless
+/// of whether the prebuilt path was used, both because it's fast (a
+/// handful of small files via the ordinary `cc` crate) and because a
+/// prebuilt shim archive could have an ABI mismatch against whatever
+/// compiler the consumer's own `cc` crate auto-detects.
+fn stage_prebuilt_package(
+    package_dir: &Path,
+    items: &[LinkItem],
+    cxx_compiler: &Path,
+    sysroot: Option<&Path>,
+    defines: &[String],
+    includes: &[String],
+) {
+    let lib_dir = package_dir.join("lib");
+    fs::create_dir_all(&lib_dir).unwrap_or_else(|e| panic!("failed to create {}: {e}", lib_dir.display()));
+
+    let mut manifest = String::new();
+    manifest.push_str("# osquery-sys prebuilt bundle manifest, schema v1\n");
+    manifest.push_str(&format!("# osquery_tag={OSQUERY_TAG}\n"));
+    manifest.push_str(&format!("# cxx_compiler={}\n", cxx_compiler.display()));
+    manifest.push_str(&format!(
+        "# sysroot={}\n",
+        sysroot.map(|p| p.display().to_string()).unwrap_or_default()
+    ));
+    manifest.push_str(&format!("# cxx_defines={}\n", defines.join("\t")));
+    manifest.push_str(&format!("# cxx_includes={}\n", includes.join("\t")));
+
+    let mut used_names: HashSet<String> = HashSet::new();
+    for item in items {
+        match item {
+            LinkItem::StaticLib {
+                dir,
+                name,
+                whole_archive,
+            } => {
+                let src_file = dir.join(archive_file_name(name));
+                let final_name = if used_names.insert(name.clone()) {
+                    name.clone()
+                } else {
+                    // A genuine name collision across different source
+                    // directories (low-probability in practice, but the
+                    // format accounts for it rather than silently
+                    // clobbering one file with another) -- disambiguate
+                    // with a short hash of the original absolute source
+                    // dir, applied identically to both the copied file's
+                    // name and the manifest's own NAME field, since
+                    // `cargo:rustc-link-lib=static=NAME` expects a file
+                    // matching NAME exactly and these must never diverge.
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    dir.hash(&mut hasher);
+                    let disambiguated = format!("{name}_{:08x}", hasher.finish() & 0xffff_ffff);
+                    used_names.insert(disambiguated.clone());
+                    disambiguated
+                };
+                let dest_file = lib_dir.join(archive_file_name(&final_name));
+                fs::copy(&src_file, &dest_file).unwrap_or_else(|e| {
+                    panic!(
+                        "failed to copy {} to {}: {e}",
+                        src_file.display(),
+                        dest_file.display()
+                    )
+                });
+                let whole_archive_field = if *whole_archive { "whole_archive" } else { "plain" };
+                manifest.push_str(&format!("STATICLIB\t{final_name}\t{whole_archive_field}\n"));
+            }
+            LinkItem::Dylib(name) => {
+                manifest.push_str(&format!("DYLIB\t{name}\t-\n"));
+            }
+            LinkItem::Framework(name) => {
+                manifest.push_str(&format!("FRAMEWORK\t{name}\t-\n"));
+            }
+        }
+    }
+
+    let manifest_path = package_dir.join("manifest.v1");
+    fs::write(&manifest_path, manifest)
+        .unwrap_or_else(|e| panic!("failed to write {}: {e}", manifest_path.display()));
+}
+
+/// The inverse of `archive_bare_name`: the platform-conventional archive
+/// filename Cargo's `cargo:rustc-link-lib=static=NAME` directive expects to
+/// find for a given bare `NAME` (`libNAME.a` on Unix, `NAME.lib` on
+/// Windows).
+fn archive_file_name(bare_name: &str) -> String {
+    if cfg!(windows) {
+        format!("{bare_name}.lib")
+    } else {
+        format!("lib{bare_name}.a")
+    }
 }
 
 /// Cargo doesn't expose the workspace/project target directory to build

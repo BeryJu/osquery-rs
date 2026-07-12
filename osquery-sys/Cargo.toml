@@ -16,3 +16,10 @@ build = "build.rs"
 [build-dependencies]
 cc = "1"
 shlex = "2"
+# Only used by the prebuilt-artifact download path (see build.rs) -- the
+# from-source path (and everything shlex/cc are used for) never touches
+# these. ureq is blocking (fits build.rs's synchronous execution model, no
+# async runtime) with default-features disabled to skip cookies/gzip/brotli/
+# charset support we don't need for one plain GET of a release asset.
+ureq = { version = "2", default-features = false, features = ["tls"] }
+sha2 = "0.10"
