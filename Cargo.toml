@@ -2,6 +2,15 @@
 resolver = "2"
 members = ["osquery-sys", "osquery"]
 
+[workspace.dependencies]
+# `version` is required here (not just `path`) because `cargo publish`
+# strips path info from a packaged crate's manifest, leaving only the
+# version requirement to resolve the dependency against crates.io --
+# without it, `cargo publish -p osquery` fails outright. Both crates always
+# share the same version (via workspace.package.version below), so this
+# must be bumped in lockstep with that whenever either is released.
+osquery-sys = { path = "osquery-sys", version = "0.1.0" }
+
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
