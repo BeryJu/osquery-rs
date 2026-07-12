@@ -1241,6 +1241,27 @@ fn collect_link_items(link_line: &str, osqueryd_path: &Path, link_cwd: &Path) ->
                 i += 1;
                 continue;
             }
+            // `/implib:osqueryd.lib` tells link.exe to also emit an import
+            // library for osqueryd.exe (so dynamically loaded extension
+            // modules can link against symbols it exports) -- it's a
+            // linker flag, not a library reference, but ends in `.lib` and
+            // starts with `/`, so without this check it would fall through
+            // to the generic `.lib` handling below. Because
+            // resolve_token_path treats any `/`-prefixed token as "looks
+            // like a flag" and returns it unresolved, archive_bare_name
+            // would then compute a bare name from the literal string
+            // `/implib:osqueryd.lib` itself (there's no real path
+            // separator before `osqueryd.lib` in this bare, cwd-relative
+            // token), yielding the nonsensical library name
+            // `implib:osqueryd` -- which rustc then rejects with
+            // "renaming of the library `implib` was specified" (the
+            // trailing `:NAME` in a `-l` flag has its own, unrelated
+            // meaning to rustc). Must be checked before the generic
+            // `.lib` suffix check.
+            if tok.get(..8).is_some_and(|p| p.eq_ignore_ascii_case("/IMPLIB:")) {
+                i += 1;
+                continue;
+            }
             if tok.ends_with(".obj") {
                 i += 1;
                 continue;
