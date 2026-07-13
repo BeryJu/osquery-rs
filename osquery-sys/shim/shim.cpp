@@ -44,18 +44,23 @@ bool g_shutdown_called = false;
 // entire lifetime (see osquery/core/system.h), so these must outlive it --
 // static storage duration, not locals of osquery_embed_init.
 //
-// --logger=rust_bridge selects RustBridgeLoggerPlugin (defined below) as
-// the *only* active logger plugin, so every internal status log (glog's
-// LOG(INFO)/LOG(WARNING)/... calls throughout osquery's own code) gets
-// forwarded through osquery_embed_set_log_callback instead of osquery's
-// default "filesystem" logger plugin, which would otherwise write them to
-// on-disk log files -- another on-disk side effect this embedded,
-// in-process use case doesn't want, same reasoning as
-// --disable_extensions.
+// --logger_plugin=rust_bridge selects RustBridgeLoggerPlugin (defined
+// below) as the *only* active logger plugin, so every internal status log
+// (glog's LOG(INFO)/LOG(WARNING)/... calls throughout osquery's own code)
+// gets forwarded through osquery_embed_set_log_callback instead of
+// osquery's default "filesystem" logger plugin, which would otherwise
+// write them to on-disk log files -- another on-disk side effect this
+// embedded, in-process use case doesn't want, same reasoning as
+// --disable_extensions. NOTE: the CLI flag is `logger_plugin`, not
+// `logger` -- "logger" is only the *registry category* name
+// (RegistryFactory::get().getActive("logger") etc.); the actual CLI_FLAG
+// declared in osquery/logger/logger.cpp is `logger_plugin`. Passing
+// `--logger=...` fails at startup with gflags' own
+// "ERROR: unknown command line flag 'logger'".
 int g_argc = 3;
 char g_arg0[] = "osquery_embed";
 char g_arg1[] = "--disable_extensions=true";
-char g_arg2[] = "--logger=rust_bridge";
+char g_arg2[] = "--logger_plugin=rust_bridge";
 char* g_argv_storage[] = {g_arg0, g_arg1, g_arg2, nullptr};
 char** g_argv = g_argv_storage;
 
