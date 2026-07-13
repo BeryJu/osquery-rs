@@ -31,5 +31,24 @@ trap 'kill "$HEARTBEAT_PID" 2>/dev/null || true' EXIT
 # live, was simply missing with no indication it had been cut). Fold
 # long lines so nothing exceeds a few KB; `set -o pipefail` above keeps
 # cargo's own real exit code (not `fold`'s) governing `set -e`.
-cargo build --workspace -vv 2>&1 | fold -w 2000
+#
+# Confirmed via a folded (non-truncated) log on a real aarch64 run:
+# osquery-sys's own build-script-emitted native link flags (-l
+# static=c++, -l static=osquery_core, etc.) are completely absent from
+# the *smoke*/osquery `--test` binaries' own rustc invocations here --
+# not a logging artifact, the command genuinely ends right after the
+# last -L flag. This is a two-`cargo`-invocation setup (a separate
+# `cargo build --workspace` first, then `cargo test -p osquery
+# --features integration-tests` second, both operating on the same
+# target/debug); "osquery-sys" shows as Fresh (not rebuilt) by the time
+# `cargo test` runs, and its cached build-script output should still be
+# replayed to any newly-compiled downstream unit (the --test binaries,
+# which need integration-tests enabled and so are new compilations) --
+# that replay is what appears to be failing here, only on this
+# aarch64/AlmaLinux9 combination (every other platform runs this exact
+# same two-invocation pattern successfully). Testing whether a single
+# `cargo test` invocation (which builds everything it needs itself,
+# rather than reusing state from a separate prior `cargo build`
+# process) avoids whatever caching interaction is dropping the
+# propagation here.
 cargo test -p osquery --features integration-tests -vv -- --nocapture 2>&1 | fold -w 2000
