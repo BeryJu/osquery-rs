@@ -110,6 +110,18 @@ jobs:
     name: Windows (x86_64)
     runs-on: windows-latest
     timeout-minutes: 240
+    env:
+      # Also set as a real env var, not just via .cargo/config.toml:
+      # actions-rust-lang/setup-rust-toolchain's own automatic `target/`
+      # cache key explicitly hashes the RUSTFLAGS *environment variable*
+      # (confirmed via its own cache-configuration log dump), not
+      # .cargo/config.toml's content -- so a config.toml-only change is
+      # invisible to that cache key, and a prior CI run silently restored
+      # a stale, pre-fix (/MD-compiled) shim.o from cache despite the
+      # config.toml fix being in place (same object-file hash, same
+      # LNK2038 error, on the run right after that fix landed). Setting
+      # the identical flag here as an env var busts that cache key too.
+      RUSTFLAGS: -C target-feature=+crt-static
     steps:
       - name: Enable long paths in git
         # osquery's own Windows build docs note path-length issues are a

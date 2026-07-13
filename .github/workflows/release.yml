@@ -120,6 +120,11 @@ jobs:
     name: Build prebuilt bundle (Windows x86_64)
     runs-on: windows-latest
     timeout-minutes: 240
+    env:
+      # See ci.yml's Windows job for why this is also set as a real env
+      # var and not left to .cargo/config.toml alone (that action's own
+      # `target/` cache key hashes the RUSTFLAGS env var specifically).
+      RUSTFLAGS: -C target-feature=+crt-static
     steps:
       - name: Enable long paths in git
         run: git config --global core.longpaths true
