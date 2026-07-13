@@ -3,6 +3,7 @@
 # the manylinux2014 container. Split out from ci.yml itself only so the
 # `docker run` invocation there stays a single readable line.
 set -eux
+set -o pipefail
 
 # Diagnostic: a prior Linux run went completely silent for 60+ minutes with
 # no way to tell whether the runner itself froze or just the compiler
@@ -20,5 +21,15 @@ set -eux
 HEARTBEAT_PID=$!
 trap 'kill "$HEARTBEAT_PID" 2>/dev/null || true' EXIT
 
-cargo build --workspace -vv
-cargo test -p osquery --features integration-tests -vv -- --nocapture
+
+# `-vv` makes Cargo echo the full rustc invocation for every crate, which
+# for this project (dozens of -L/-l flags per compile) produces single
+# physical log lines tens of KB long -- past whatever length GitHub
+# Actions' own log storage silently truncates at, which made a real
+# aarch64 link failure impossible to fully diagnose from the captured
+# log (the tail of the actual command, where the interesting -l flags
+# live, was simply missing with no indication it had been cut). Fold
+# long lines so nothing exceeds a few KB; `set -o pipefail` above keeps
+# cargo's own real exit code (not `fold`'s) governing `set -e`.
+cargo build --workspace -vv 2>&1 | fold -w 2000
+cargo test -p osquery --features integration-tests -vv -- --nocapture 2>&1 | fold -w 2000
