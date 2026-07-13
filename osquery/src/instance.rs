@@ -43,6 +43,12 @@ impl OsqueryInstance {
             return Err(OsqueryError::AlreadyInitialized);
         }
 
+        // Must happen before osquery_embed_init: the callback is wired
+        // into osquery's own logger plugin registry as part of startup,
+        // and registering it first means early startup log lines are
+        // captured too, not just ones logged after this call returns.
+        crate::logging::install();
+
         // The shim ignores argc/argv today (it constructs its own fixed
         // argv internally so `--disable_extensions=true` is always
         // present); the parameters exist for future flexibility. See
