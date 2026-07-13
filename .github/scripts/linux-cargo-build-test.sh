@@ -37,18 +37,20 @@ trap 'kill "$HEARTBEAT_PID" 2>/dev/null || true' EXIT
 # static=c++, -l static=osquery_core, etc.) are completely absent from
 # the *smoke*/osquery `--test` binaries' own rustc invocations here --
 # not a logging artifact, the command genuinely ends right after the
-# last -L flag. This is a two-`cargo`-invocation setup (a separate
-# `cargo build --workspace` first, then `cargo test -p osquery
-# --features integration-tests` second, both operating on the same
-# target/debug); "osquery-sys" shows as Fresh (not rebuilt) by the time
-# `cargo test` runs, and its cached build-script output should still be
-# replayed to any newly-compiled downstream unit (the --test binaries,
-# which need integration-tests enabled and so are new compilations) --
-# that replay is what appears to be failing here, only on this
-# aarch64/AlmaLinux9 combination (every other platform runs this exact
-# same two-invocation pattern successfully). Testing whether a single
-# `cargo test` invocation (which builds everything it needs itself,
-# rather than reusing state from a separate prior `cargo build`
-# process) avoids whatever caching interaction is dropping the
-# propagation here.
+# last -L flag. Ruled out a two-`cargo`-invocation caching interaction
+# (merging the former separate `cargo build --workspace` +
+# `cargo test -p osquery --features integration-tests` into the single
+# invocation below made no difference -- osquery-sys's own compile still
+# has the correct flags, the downstream --test binary still gets none of
+# them, even within one cargo process). This only happens on this
+# aarch64/AlmaLinux9 combination; every other platform works
+# unmodified. Testing whether disabling incremental compilation (a real,
+# precedented category of Cargo/rustc metadata-caching bugs) avoids
+# whatever is dropping this propagation, scoped to aarch64 only so the
+# already-working x86_64 path (which also runs this same script) is
+# untouched.
+if [ "$(uname -m)" = "aarch64" ]; then
+  export CARGO_INCREMENTAL=0
+fi
+
 cargo test -p osquery --features integration-tests -vv -- --nocapture 2>&1 | fold -w 2000
