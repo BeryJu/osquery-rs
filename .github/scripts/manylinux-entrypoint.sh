@@ -29,7 +29,16 @@ sed -i s/^mirrorlist=http/#mirrorlist=http/g /etc/yum.repos.d/*.repo
 # starts compiling. Found one at a time via real CI failures; add any
 # further missing modules the same way if OpenSSL's Configure still
 # complains.
-yum install -y git bison flex make ccache curl ca-certificates pkgconfig \
+#
+# No `ccache` here (unlike docker/build.Dockerfile's local-dev image):
+# it's not available in manylinux2014_aarch64's repos at all ("No package
+# ccache available"), and yum aborts the *entire* install if even one
+# requested package is missing ("Not tolerating missing names on
+# install"). build.rs never actually wires CMAKE_*_COMPILER_LAUNCHER=
+# ccache into the configure anyway, so it was never more than an unused
+# nice-to-have here -- just leave it out instead of chasing an EPEL repo
+# for a package this build doesn't use.
+yum install -y git bison flex make curl ca-certificates pkgconfig \
   perl-IPC-Cmd perl-Data-Dumper perl-Time-Piece
 yum groupinstall -y "Development Tools"
 
