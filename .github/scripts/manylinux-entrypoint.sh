@@ -35,6 +35,19 @@ case "$ID" in
   *) PKGCONFIG_PKG=pkgconf-pkg-config ;;
 esac
 
+# perl-FindBin: unlike perl-IPC-Cmd/perl-Data-Dumper/perl-Time-Piece
+# (split out on BOTH images below), FindBin.pm ships bundled directly in
+# CentOS 7's base perl package already -- confirmed directly:
+# /usr/share/perl5/FindBin.pm exists there with nothing extra installed,
+# and "perl-FindBin" doesn't even exist as a package name on that image
+# (yum would abort the *entire* install trying to resolve it, same
+# "Not tolerating missing names" failure mode as ccache below). AlmaLinux
+# 9 does split it out separately, so it's only needed there.
+EXTRA_PERL_PKGS=(perl-IPC-Cmd perl-Data-Dumper perl-Time-Piece)
+if [ "$ID" != "centos" ]; then
+  EXTRA_PERL_PKGS+=(perl-FindBin)
+fi
+
 # No-ops on manylinux_2_34/AlmaLinux 9 (its repo files don't contain
 # "mirror.centos.org" at all) -- only actually matters for manylinux2014/
 # CentOS 7, which is EOL upstream (mirrorlist.centos.org 404s), so repoint
@@ -42,15 +55,18 @@ esac
 sed -i s/mirror.centos.org/vault.centos.org/g /etc/yum.repos.d/*.repo
 sed -i s/^#.*baseurl=http/baseurl=http/g /etc/yum.repos.d/*.repo
 sed -i s/^mirrorlist=http/#mirrorlist=http/g /etc/yum.repos.d/*.repo
-# perl-IPC-Cmd/perl-Data-Dumper/perl-Time-Piece: not part of
-# manylinux2014's base perl install (manylinux_2_34 already ships some of
-# these, but installing an already-installed package is harmless), but
-# required by OpenSSL's own `Configure`/generated Makefile (vendored by
-# osquery) -- without these, OpenSSL's own build fails with "Can't locate
-# IPC/Cmd.pm" or "Can't locate Time/Piece.pm" in @INC before any of
+# The perl-* packages in EXTRA_PERL_PKGS above are required by OpenSSL's
+# own `Configure`/generated Makefile (vendored by osquery) -- without
+# them, OpenSSL's own build fails with "Can't locate IPC/Cmd.pm"/"Can't
+# locate Time/Piece.pm"/"Can't locate FindBin.pm" in @INC before any of
 # osquery's own code even starts compiling. Found one at a time via real
-# CI failures; add any further missing modules the same way if OpenSSL's
-# Configure still complains.
+# CI failures; checked Configure/util/perl/OpenSSL/*.pm's own `use`
+# statements afterward for the complete list -- everything else
+# referenced there (Carp, Exporter, File::*, Cwd, Scalar::Util,
+# Getopt::Std, POSIX, Config) is a true Perl core module present on every
+# distro, not split into its own package anywhere. Add any further
+# missing modules the same way if OpenSSL's Configure still complains
+# regardless.
 #
 # No `ccache` here (unlike docker/build.Dockerfile's local-dev image):
 # it's not available in manylinux2014_aarch64's repos at all ("No package
@@ -62,7 +78,7 @@ sed -i s/^mirrorlist=http/#mirrorlist=http/g /etc/yum.repos.d/*.repo
 # for a package this build doesn't use (even where it is available, e.g.
 # manylinux_2_34, for the same reason: consistency, not necessity).
 yum install -y git bison flex make curl ca-certificates "$PKGCONFIG_PKG" \
-  perl-IPC-Cmd perl-Data-Dumper perl-Time-Piece
+  "${EXTRA_PERL_PKGS[@]}"
 yum groupinstall -y "Development Tools"
 
 # CentOS 7's stock yum cmake package is 2.8.12 -- far too old for osquery.
