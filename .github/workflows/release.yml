@@ -67,7 +67,7 @@ jobs:
           sha256sum "dist/osquery-sys-${VERSION}-${TARGET}.tar.zst" \
             | awk '{print $1}' > "dist/osquery-sys-${VERSION}-${TARGET}.sha256"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: prebuilt-x86_64-unknown-linux-gnu
           path: dist/*
@@ -111,7 +111,7 @@ jobs:
           shasum -a 256 "dist/osquery-sys-${VERSION}-${TARGET}.tar.zst" \
             | awk '{print $1}' > "dist/osquery-sys-${VERSION}-${TARGET}.sha256"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: prebuilt-aarch64-apple-darwin
           path: dist/*
@@ -159,7 +159,7 @@ jobs:
           $hash = (Get-FileHash "dist/osquery-sys-$version-$target.tar.zst" -Algorithm SHA256).Hash.ToLower()
           Set-Content -Path "dist/osquery-sys-$version-$target.sha256" -Value $hash -NoNewline
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: prebuilt-x86_64-pc-windows-msvc
           path: dist/*
