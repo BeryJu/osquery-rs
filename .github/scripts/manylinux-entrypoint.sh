@@ -77,8 +77,9 @@ sed -i s/^mirrorlist=http/#mirrorlist=http/g /etc/yum.repos.d/*.repo
 # nice-to-have here -- just leave it out instead of chasing an EPEL repo
 # for a package this build doesn't use (even where it is available, e.g.
 # manylinux_2_34, for the same reason: consistency, not necessity).
-yum install -y git bison flex make curl ca-certificates "$PKGCONFIG_PKG" \
-  "${EXTRA_PERL_PKGS[@]}"
+#
+yum install -y git bison flex make curl ca-certificates \
+  "$PKGCONFIG_PKG" "${EXTRA_PERL_PKGS[@]}"
 yum groupinstall -y "Development Tools"
 
 # CentOS 7's stock yum cmake package is 2.8.12 -- far too old for osquery.
@@ -110,6 +111,29 @@ rm /tmp/toolchain.tar.xz
 if [ ! -f /usr/local/osquery-toolchain/usr/include/xlocale.h ]; then
   printf '#pragma once\n#include <locale.h>\n' \
     > /usr/local/osquery-toolchain/usr/include/xlocale.h
+fi
+
+# On AlmaLinux 9, the final link (which uses the host's own default gcc
+# as the linker driver, not the osquery-toolchain's own -- see build.rs's
+# comment on why) fails with "ld: cannot find
+# /usr/lib64/libpthread_nonshared.a: No such file or directory". This is
+# a leftover, hardcoded absolute-path reference inside this container's
+# own gcc-toolset-14 spec, dating from RHEL's old libpthread-into-libc
+# merge transition; RHEL9/AlmaLinux 9 completed that merge and dropped
+# the file entirely -- confirmed no package anywhere in this image's
+# repos provides it (`yum provides /usr/lib64/libpthread_nonshared.a`
+# finds nothing; `glibc-static`, the plausible-looking package, doesn't
+# contain it either). The osquery-toolchain itself happens to bundle its
+# own tiny copy (a long-standing, effectively-empty RHEL compatibility
+# placeholder, not real code) at
+# usr/lib/libpthread_nonshared.a in its own sysroot -- just place that at
+# the literal path gcc's spec expects, since it's not a real, searchable
+# `-lname` reference this can be fixed by adding a `-L` directory for.
+# CentOS 7 doesn't need this (its glibc-devel already provides the file
+# at that same system path).
+if [ ! -f /usr/lib64/libpthread_nonshared.a ] \
+    && [ -f /usr/local/osquery-toolchain/usr/lib/libpthread_nonshared.a ]; then
+  cp /usr/local/osquery-toolchain/usr/lib/libpthread_nonshared.a /usr/lib64/
 fi
 
 export RUSTUP_HOME=/usr/local/rustup
