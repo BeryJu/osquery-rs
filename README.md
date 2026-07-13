@@ -206,6 +206,21 @@ by default it looks at `/usr/local/osquery-toolchain`
 - **Prebuilt bundles only cover 3 target triples** (see "Default path:
   prebuilt download" above) -- anything else falls back to a from-source
   build automatically, with an informational `cargo:warning`.
+- **Windows requires a static CRT (`+crt-static`)**: osquery's own CMake
+  build links its C++ static libraries with `/MT`, not Rust's own default
+  `/MD` on `x86_64-pc-windows-msvc` -- mixing the two fails at final link
+  time with `LNK2038` ("mismatch detected for 'RuntimeLibrary'") plus
+  `LNK2005` duplicate-symbol errors. This repo's own `.cargo/config.toml`
+  sets `-C target-feature=+crt-static` for that target (which also makes
+  the `cc` crate switch osquery-sys's own shim compile from `/MD` to
+  `/MT` to match, since it reads `CARGO_CFG_TARGET_FEATURE`), but that
+  file only applies to builds run from within this repo/workspace -- **a
+  downstream consumer building for Windows needs the same setting in
+  their own project** (either a `.cargo/config.toml` with the block
+  above, or `RUSTFLAGS="-C target-feature=+crt-static"`), on both the
+  prebuilt and from-source paths equally, since it's Rust's own CRT
+  choice at issue, not anything osquery-sys's build script can force for
+  a downstream crate graph on its own.
 
 ## Release process (maintainers)
 

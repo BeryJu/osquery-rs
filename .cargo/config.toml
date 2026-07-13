@@ -1,0 +1,17 @@
+# osquery's own CMake build links its C++ static libraries with a static
+# CRT (`/MT`), not Rust's own default dynamic CRT (`/MD`) on this target.
+# Mixing the two produces link-time errors: `LNK2038` ("mismatch detected
+# for 'RuntimeLibrary'") plus `LNK2005` duplicate symbols between
+# msvcprt.lib/libcpmt.lib, and a final `LNK1169`. Forcing `+crt-static`
+# makes Rust's own runtime link statically too, and -- just as
+# importantly -- makes the `cc` crate (which reads
+# `CARGO_CFG_TARGET_FEATURE` to pick its own default) automatically
+# switch osquery-sys's shim compile from `/MD` to `/MT`, matching
+# osquery's own libraries.
+#
+# This only affects builds run from within this repo/workspace. A
+# downstream consumer's own project needs the equivalent
+# `.cargo/config.toml` (or `RUSTFLAGS`) for Windows builds to link --
+# see README.md's Windows section.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
