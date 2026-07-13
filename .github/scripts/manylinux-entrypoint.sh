@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
-# Runs inside `docker run ... quay.io/pypa/manylinux2014_<arch>` (see the
-# Linux jobs in ci.yml/release.yml for why this is invoked via a manual
-# `docker run` rather than the job-level `container:` key). Sets up
-# everything osquery's from-source build needs on this old-glibc base --
-# yum prerequisites, a modern CMake, a plain `python3`, osquery-toolchain,
-# and Rust itself (this container has none of these) -- then execs
-# whatever command was passed as this script's own arguments. Works
-# unmodified on both x86_64 and aarch64 host runners (see ARCH below).
+# Runs inside `docker run ... quay.io/pypa/manylinux2014_<arch>` (x86_64) or
+# `quay.io/pypa/manylinux_2_28_<arch>` (aarch64 -- see the aarch64 Linux
+# job's own comment in ci.yml for why a newer manylinux tier is needed
+# there) -- see the Linux jobs in ci.yml/release.yml for why this is
+# invoked via a manual `docker run` rather than the job-level `container:`
+# key. Sets up everything osquery's from-source build needs on whichever
+# of these old(-ish)-glibc bases is in use -- yum prerequisites, a modern
+# CMake, a plain `python3`, osquery-toolchain, and Rust itself (neither
+# container has any of these) -- then execs whatever command was passed as
+# this script's own arguments. Works unmodified across both image
+# families/architectures (see ARCH/PKGCONFIG_PKG below).
 set -eux
 
 case "$(uname -m)" in
@@ -18,17 +21,36 @@ case "$(uname -m)" in
     ;;
 esac
 
+# manylinux2014 (CentOS 7) names the pkg-config package `pkgconfig`;
+# manylinux_2_28 (AlmaLinux 8) renamed it to `pkgconf-pkg-config` (and
+# actually ships it preinstalled already, but naming it explicitly here is
+# harmless either way). Sourcing /etc/os-release's $ID is the actual
+# distinguishing factor, not the architecture -- this project's own CI
+# usage happens to pair x86_64 with manylinux2014 and aarch64 with
+# manylinux_2_28, but that pairing isn't something to bake an assumption
+# on here.
+. /etc/os-release
+case "$ID" in
+  centos) PKGCONFIG_PKG=pkgconfig ;;
+  *) PKGCONFIG_PKG=pkgconf-pkg-config ;;
+esac
+
+# No-ops on manylinux_2_28/AlmaLinux 8 (its repo files don't contain
+# "mirror.centos.org" at all) -- only actually matters for manylinux2014/
+# CentOS 7, which is EOL upstream (mirrorlist.centos.org 404s), so repoint
+# yum at the community-maintained vault mirror first.
 sed -i s/mirror.centos.org/vault.centos.org/g /etc/yum.repos.d/*.repo
 sed -i s/^#.*baseurl=http/baseurl=http/g /etc/yum.repos.d/*.repo
 sed -i s/^mirrorlist=http/#mirrorlist=http/g /etc/yum.repos.d/*.repo
 # perl-IPC-Cmd/perl-Data-Dumper/perl-Time-Piece: not part of
-# manylinux2014's base perl install, but required by OpenSSL's own
-# `Configure`/generated Makefile (vendored by osquery) -- without these,
-# OpenSSL's own build fails with "Can't locate IPC/Cmd.pm" or "Can't
-# locate Time/Piece.pm" in @INC before any of osquery's own code even
-# starts compiling. Found one at a time via real CI failures; add any
-# further missing modules the same way if OpenSSL's Configure still
-# complains.
+# manylinux2014's base perl install (manylinux_2_28 already ships some of
+# these, but installing an already-installed package is harmless), but
+# required by OpenSSL's own `Configure`/generated Makefile (vendored by
+# osquery) -- without these, OpenSSL's own build fails with "Can't locate
+# IPC/Cmd.pm" or "Can't locate Time/Piece.pm" in @INC before any of
+# osquery's own code even starts compiling. Found one at a time via real
+# CI failures; add any further missing modules the same way if OpenSSL's
+# Configure still complains.
 #
 # No `ccache` here (unlike docker/build.Dockerfile's local-dev image):
 # it's not available in manylinux2014_aarch64's repos at all ("No package
@@ -37,8 +59,9 @@ sed -i s/^mirrorlist=http/#mirrorlist=http/g /etc/yum.repos.d/*.repo
 # install"). build.rs never actually wires CMAKE_*_COMPILER_LAUNCHER=
 # ccache into the configure anyway, so it was never more than an unused
 # nice-to-have here -- just leave it out instead of chasing an EPEL repo
-# for a package this build doesn't use.
-yum install -y git bison flex make curl ca-certificates pkgconfig \
+# for a package this build doesn't use (even where it is available, e.g.
+# manylinux_2_28, for the same reason: consistency, not necessity).
+yum install -y git bison flex make curl ca-certificates "$PKGCONFIG_PKG" \
   perl-IPC-Cmd perl-Data-Dumper perl-Time-Piece
 yum groupinstall -y "Development Tools"
 

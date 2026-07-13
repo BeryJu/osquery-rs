@@ -75,57 +75,40 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # Deliberately NOT manylinux2014_aarch64 (unlike the x86_64 Linux job
-      # above): tried that first, and the osquery-toolchain's own aarch64
-      # clang/LLVM 18.1 binary can't even *run* on manylinux2014's glibc
-      # 2.17 ("/lib64/libm.so.6: version `GLIBC_2.27' not found (required
-      # by .../libLLVM.so.18.1)") -- unlike the x86_64 build of the same
-      # toolchain release, which tolerates glibc 2.17 fine. This job's only
-      # purpose is verifying the from-source build itself works (ci.yml
-      # always forces OSQUERY_SYS_FORCE_SOURCE_BUILD=1); it isn't feeding a
-      # prebuilt release artifact the way release.yml's x86_64 job is, so
-      # there's no reason to fight an old-glibc floor here at all -- build
-      # directly on the runner's own modern glibc instead, matching the
-      # already-proven recipe in docker/build.Dockerfile.
-      - name: Install build prerequisites
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            git python3 bison flex make cmake ccache curl ca-certificates \
-            build-essential pkg-config
-
-      - name: Install osquery-toolchain
-        run: |
-          set -eux
-          curl -fsSL -o /tmp/toolchain.tar.xz \
-            "https://github.com/osquery/osquery-toolchain/releases/download/1.3.0/osquery-toolchain-1.3.0-aarch64.tar.xz"
-          sudo tar xf /tmp/toolchain.tar.xz -C /usr/local
-          rm /tmp/toolchain.tar.xz
-
-      - name: Shim xlocale.h into the toolchain sysroot (only if missing)
-        # This toolchain release's aarch64 build genuinely lacks xlocale.h
-        # (needs this shim); see docker/build.Dockerfile's identical
-        # comment for the full x86_64-vs-aarch64 explanation.
-        run: |
-          if [ ! -f /usr/local/osquery-toolchain/usr/include/xlocale.h ]; then
-            sudo sh -c 'printf "#pragma once\n#include <locale.h>\n" > /usr/local/osquery-toolchain/usr/include/xlocale.h'
-          fi
-
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          cache: false
-
       - name: Restore osquery source + native build cache
         uses: actions/cache@v6
         with:
           path: target/osquery-sys
           key: osquery-sys-linux-arm64-${{ hashFiles('osquery-sys/build.rs') }}
 
-      - name: cargo build
-        run: cargo build --workspace -vv
-
-      - name: cargo test (integration)
-        run: cargo test -p osquery --features integration-tests -vv -- --nocapture
+      - name: Build + test inside manylinux_2_28 (glibc 2.28 floor)
+        # Deliberately NOT manylinux2014_aarch64 (unlike the x86_64 Linux
+        # job above, which does use manylinux2014): tried that first, and
+        # the osquery-toolchain's own aarch64 clang/LLVM 18.1 binary can't
+        # even *run* on manylinux2014's glibc 2.17
+        # ("/lib64/libm.so.6: version `GLIBC_2.27' not found (required by
+        # .../libLLVM.so.18.1)") -- unlike the x86_64 build of the same
+        # toolchain release, which tolerates glibc 2.17 fine.
+        # manylinux_2_28 (AlmaLinux 8, glibc 2.28) is the next widely-used
+        # manylinux tier up and satisfies that >=2.27 floor, so that's the
+        # glibc floor release.yml's aarch64 prebuilt bundle targets too --
+        # this job runs the identical container so CI actually exercises
+        # what gets shipped, not a more-lenient stand-in for it. See the
+        # x86_64 Linux job above for why this runs via a manual `docker
+        # run` rather than the job-level `container:` key (same GitHub
+        # Actions Node/glibc incompatibility applies to any old-enough
+        # container). manylinux-entrypoint.sh detects the container's own
+        # architecture and picks the matching osquery-toolchain release
+        # itself; no aarch64-specific handling needed here beyond the
+        # image tag.
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:${{ github.workspace }}" \
+            -w "${{ github.workspace }}" \
+            -e OSQUERY_SYS_FORCE_SOURCE_BUILD \
+            quay.io/pypa/manylinux_2_28_aarch64 \
+            bash .github/scripts/manylinux-entrypoint.sh \
+            bash .github/scripts/linux-cargo-build-test.sh
 
   macos:
     name: macOS (aarch64)
