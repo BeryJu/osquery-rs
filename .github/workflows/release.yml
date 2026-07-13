@@ -88,23 +88,29 @@ jobs:
           key: osquery-sys-linux-arm64-${{ hashFiles('osquery-sys/build.rs') }}
 
       - name: Build osquery-sys and stage the prebuilt bundle
-        # manylinux_2_28 (AlmaLinux 8, glibc 2.28), not manylinux2014 (glibc
-        # 2.17) like the x86_64 job above: the osquery-toolchain's own
-        # aarch64 clang/LLVM 18.1 binary can't run at all on glibc 2.17
-        # ("/lib64/libm.so.6: version `GLIBC_2.27' not found"), unlike the
-        # x86_64 build of the same toolchain release. manylinux_2_28 is the
-        # next widely-used manylinux tier up and satisfies that >=2.27
-        # floor -- verified directly (`clang --version` actually runs
-        # there) before committing to it, not assumed. This means the
-        # shipped aarch64 Linux artifact's glibc floor (2.28) is newer than
-        # the x86_64 artifact's (2.17); see ci.yml's aarch64 job for the
-        # same container, so CI actually exercises what gets shipped here.
+        # manylinux_2_34 (glibc 2.34), not manylinux2014 (glibc 2.17) like
+        # the x86_64 job above, and not manylinux_2_28 (glibc 2.28) either:
+        # the osquery-toolchain's own aarch64 clang/LLVM 18.1 binary can't
+        # run at all on glibc 2.17 ("/lib64/libm.so.6: version `GLIBC_2.27'
+        # not found"), unlike the x86_64 build of the same toolchain
+        # release; manylinux_2_28 satisfies clang itself but not its
+        # *bundled assembler*, which separately needs glibc>=2.34
+        # ("/lib64/libc.so.6: version `GLIBC_2.34' not found (required by
+        # .../usr/bin/as)") -- only surfaced once an actual assembly file
+        # got compiled (libgcrypt's mpih-mul3-asm.S), since `clang
+        # --version` alone doesn't exercise the assembler. manylinux_2_34
+        # satisfies both; verified directly (both `clang --version` and an
+        # actual `.S` compile) before committing to it, not assumed. This
+        # means the shipped aarch64 Linux artifact's glibc floor (2.34) is
+        # considerably newer than the x86_64 artifact's (2.17); see
+        # ci.yml's aarch64 job for the same container, so CI actually
+        # exercises what gets shipped here.
         run: |
           docker run --rm \
             -v "${{ github.workspace }}:${{ github.workspace }}" \
             -w "${{ github.workspace }}" \
             -e OSQUERY_SYS_PACKAGE_DIR="${{ github.workspace }}/pkg" \
-            quay.io/pypa/manylinux_2_28_aarch64 \
+            quay.io/pypa/manylinux_2_34_aarch64 \
             bash .github/scripts/manylinux-entrypoint.sh \
             cargo build --workspace -vv
 

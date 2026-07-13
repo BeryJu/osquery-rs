@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Runs inside `docker run ... quay.io/pypa/manylinux2014_<arch>` (x86_64) or
-# `quay.io/pypa/manylinux_2_28_<arch>` (aarch64 -- see the aarch64 Linux
-# job's own comment in ci.yml for why a newer manylinux tier is needed
-# there) -- see the Linux jobs in ci.yml/release.yml for why this is
-# invoked via a manual `docker run` rather than the job-level `container:`
-# key. Sets up everything osquery's from-source build needs on whichever
-# of these old(-ish)-glibc bases is in use -- yum prerequisites, a modern
-# CMake, a plain `python3`, osquery-toolchain, and Rust itself (neither
-# container has any of these) -- then execs whatever command was passed as
-# this script's own arguments. Works unmodified across both image
-# families/architectures (see ARCH/PKGCONFIG_PKG below).
+# Runs inside `docker run ... quay.io/pypa/manylinux2014_<arch>` (x86_64,
+# CentOS 7) or `quay.io/pypa/manylinux_2_34_<arch>` (aarch64, AlmaLinux 9 --
+# see the aarch64 Linux job's own comment in ci.yml for why a newer
+# manylinux tier is needed there) -- see the Linux jobs in ci.yml/
+# release.yml for why this is invoked via a manual `docker run` rather than
+# the job-level `container:` key. Sets up everything osquery's from-source
+# build needs on whichever of these old(-ish)-glibc bases is in use -- yum
+# prerequisites, a modern CMake, a plain `python3`, osquery-toolchain, and
+# Rust itself (neither container has any of these) -- then execs whatever
+# command was passed as this script's own arguments. Works unmodified
+# across both image families/architectures (see ARCH/PKGCONFIG_PKG below).
 set -eux
 
 case "$(uname -m)" in
@@ -22,12 +22,12 @@ case "$(uname -m)" in
 esac
 
 # manylinux2014 (CentOS 7) names the pkg-config package `pkgconfig`;
-# manylinux_2_28 (AlmaLinux 8) renamed it to `pkgconf-pkg-config` (and
+# manylinux_2_34 (AlmaLinux 9) renamed it to `pkgconf-pkg-config` (and
 # actually ships it preinstalled already, but naming it explicitly here is
 # harmless either way). Sourcing /etc/os-release's $ID is the actual
 # distinguishing factor, not the architecture -- this project's own CI
 # usage happens to pair x86_64 with manylinux2014 and aarch64 with
-# manylinux_2_28, but that pairing isn't something to bake an assumption
+# manylinux_2_34, but that pairing isn't something to bake an assumption
 # on here.
 . /etc/os-release
 case "$ID" in
@@ -35,7 +35,7 @@ case "$ID" in
   *) PKGCONFIG_PKG=pkgconf-pkg-config ;;
 esac
 
-# No-ops on manylinux_2_28/AlmaLinux 8 (its repo files don't contain
+# No-ops on manylinux_2_34/AlmaLinux 9 (its repo files don't contain
 # "mirror.centos.org" at all) -- only actually matters for manylinux2014/
 # CentOS 7, which is EOL upstream (mirrorlist.centos.org 404s), so repoint
 # yum at the community-maintained vault mirror first.
@@ -43,7 +43,7 @@ sed -i s/mirror.centos.org/vault.centos.org/g /etc/yum.repos.d/*.repo
 sed -i s/^#.*baseurl=http/baseurl=http/g /etc/yum.repos.d/*.repo
 sed -i s/^mirrorlist=http/#mirrorlist=http/g /etc/yum.repos.d/*.repo
 # perl-IPC-Cmd/perl-Data-Dumper/perl-Time-Piece: not part of
-# manylinux2014's base perl install (manylinux_2_28 already ships some of
+# manylinux2014's base perl install (manylinux_2_34 already ships some of
 # these, but installing an already-installed package is harmless), but
 # required by OpenSSL's own `Configure`/generated Makefile (vendored by
 # osquery) -- without these, OpenSSL's own build fails with "Can't locate
@@ -60,7 +60,7 @@ sed -i s/^mirrorlist=http/#mirrorlist=http/g /etc/yum.repos.d/*.repo
 # ccache into the configure anyway, so it was never more than an unused
 # nice-to-have here -- just leave it out instead of chasing an EPEL repo
 # for a package this build doesn't use (even where it is available, e.g.
-# manylinux_2_28, for the same reason: consistency, not necessity).
+# manylinux_2_34, for the same reason: consistency, not necessity).
 yum install -y git bison flex make curl ca-certificates "$PKGCONFIG_PKG" \
   perl-IPC-Cmd perl-Data-Dumper perl-Time-Piece
 yum groupinstall -y "Development Tools"
