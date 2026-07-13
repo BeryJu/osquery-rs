@@ -142,23 +142,6 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
   | sh -s -- -y --profile minimal --default-toolchain stable --no-modify-path
 export PATH="/usr/local/cargo/bin:$PATH"
 
-# Diagnostic experiment: on this aarch64/AlmaLinux9 combination only,
-# osquery-sys's own build-script-emitted native link flags (-l
-# static=c++, -l static=osquery_core, etc.) never reach the smoke/
-# osquery --test binary's own rustc link invocation -- confirmed real
-# (not a log-truncation artifact) across multiple rounds, and NOT fixed
-# by merging the build+test cargo invocations into one or by disabling
-# incremental compilation. Testing whether this is a regression
-# specific to the rust-toolchain.toml-pinned 1.97.0 by forcing an older
-# toolchain here instead (RUSTUP_TOOLCHAIN overrides the repo's
-# toolchain-file pin). x86_64 is untouched -- still uses whatever
-# rust-toolchain.toml pins, via actions-rust-lang/setup-rust-toolchain
-# on the host, unaffected by anything in this container-only script.
-if [ "$ARCH" = "aarch64" ]; then
-  rustup toolchain install 1.90.0 --profile minimal
-  export RUSTUP_TOOLCHAIN=1.90.0
-fi
-
 # The container runs as root, so anything it writes under the (bind-mounted)
 # workspace -- notably target/osquery-sys, which actions/cache needs to read
 # back on the host afterward, and pkg/, which release.yml's packaging step

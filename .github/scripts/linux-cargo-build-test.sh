@@ -37,20 +37,24 @@ trap 'kill "$HEARTBEAT_PID" 2>/dev/null || true' EXIT
 # static=c++, -l static=osquery_core, etc.) are completely absent from
 # the *smoke*/osquery `--test` binaries' own rustc invocations here --
 # not a logging artifact, the command genuinely ends right after the
-# last -L flag. Ruled out a two-`cargo`-invocation caching interaction
-# (merging the former separate `cargo build --workspace` +
-# `cargo test -p osquery --features integration-tests` into the single
-# invocation below made no difference -- osquery-sys's own compile still
-# has the correct flags, the downstream --test binary still gets none of
-# them, even within one cargo process). This only happens on this
-# aarch64/AlmaLinux9 combination; every other platform works
-# unmodified. Testing whether disabling incremental compilation (a real,
-# precedented category of Cargo/rustc metadata-caching bugs) avoids
-# whatever is dropping this propagation, scoped to aarch64 only so the
-# already-working x86_64 path (which also runs this same script) is
-# untouched.
+# last -L flag. osquery-sys's own build script runs exactly once (single
+# metadata hash, single OUT_DIR), and its emitted directives are correct
+# -- the divergence is purely in whether Cargo attaches them to a given
+# downstream Unit. Ruled out, each via a real CI round with the
+# identical symptom persisting: a two-cargo-invocation caching
+# interaction, disabling incremental compilation, and an older Rust
+# toolchain (1.90.0 vs the repo's pinned 1.97.0 -- both show it). This
+# only happens on this aarch64/AlmaLinux9 combination; every other
+# platform works unmodified with this exact same script/build.rs.
+#
+# Next step: get Cargo's own internal reasoning instead of guessing
+# again -- CARGO_LOG (not RUST_LOG, which Cargo deliberately avoids so
+# it doesn't collide with a built program's own logging) enables
+# Cargo's own env_logger-based tracing. Scoped to aarch64 only so the
+# already-working x86_64 path (which also runs this same script) stays
+# untouched and its log stays readable.
 if [ "$(uname -m)" = "aarch64" ]; then
-  export CARGO_INCREMENTAL=0
+  export CARGO_LOG=cargo::core::compiler=trace
 fi
 
 cargo test -p osquery --features integration-tests -vv -- --nocapture 2>&1 | fold -w 2000
