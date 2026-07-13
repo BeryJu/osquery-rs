@@ -1,12 +1,22 @@
 #!/usr/bin/env bash
-# Runs inside `docker run ... quay.io/pypa/manylinux2014_x86_64` (see the
+# Runs inside `docker run ... quay.io/pypa/manylinux2014_<arch>` (see the
 # Linux jobs in ci.yml/release.yml for why this is invoked via a manual
 # `docker run` rather than the job-level `container:` key). Sets up
 # everything osquery's from-source build needs on this old-glibc base --
 # yum prerequisites, a modern CMake, a plain `python3`, osquery-toolchain,
 # and Rust itself (this container has none of these) -- then execs
-# whatever command was passed as this script's own arguments.
+# whatever command was passed as this script's own arguments. Works
+# unmodified on both x86_64 and aarch64 host runners (see ARCH below).
 set -eux
+
+case "$(uname -m)" in
+  aarch64) ARCH=aarch64 ;;
+  x86_64) ARCH=x86_64 ;;
+  *)
+    echo "unsupported arch $(uname -m)" >&2
+    exit 1
+    ;;
+esac
 
 sed -i s/mirror.centos.org/vault.centos.org/g /etc/yum.repos.d/*.repo
 sed -i s/^#.*baseurl=http/baseurl=http/g /etc/yum.repos.d/*.repo
@@ -37,14 +47,18 @@ cmake --version
 python3 --version
 
 curl -fsSL -o /tmp/toolchain.tar.xz \
-  "https://github.com/osquery/osquery-toolchain/releases/download/1.3.0/osquery-toolchain-1.3.0-x86_64.tar.xz"
+  "https://github.com/osquery/osquery-toolchain/releases/download/1.3.0/osquery-toolchain-1.3.0-${ARCH}.tar.xz"
 tar xf /tmp/toolchain.tar.xz -C /usr/local
 rm /tmp/toolchain.tar.xz
 
 # osquery vendors augeas, whose gnulib submodule ships a pregenerated
 # header assuming <xlocale.h> exists; real xlocale.h was removed from
-# modern glibc years ago. This toolchain release's x86_64 build already
-# ships a complete, real xlocale.h -- only shim it in if it's missing.
+# modern glibc years ago. This toolchain release's aarch64 build
+# genuinely lacks xlocale.h (needs this shim); its x86_64 build already
+# ships a complete, real one (an older glibc header snapshot that still
+# declares functions using it directly) -- only shim it in if it's
+# missing, never overwrite a real one (see docker/build.Dockerfile's
+# identical comment for the two archs' actual difference).
 if [ ! -f /usr/local/osquery-toolchain/usr/include/xlocale.h ]; then
   printf '#pragma once\n#include <locale.h>\n' \
     > /usr/local/osquery-toolchain/usr/include/xlocale.h

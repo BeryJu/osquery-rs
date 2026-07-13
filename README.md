@@ -26,9 +26,11 @@ full fallback behavior and what's still required even on the prebuilt
 path.
 
 **CI** (`.github/workflows/ci.yml`) exercises the from-source build/test on
-Linux, macOS, and Windows on every push (`OSQUERY_SYS_FORCE_SOURCE_BUILD=1`
-is set there specifically so it keeps testing that path even once real
-prebuilt releases exist). A separate workflow
+Linux (x86_64 and aarch64, the latter on GitHub's native arm64-hosted
+runners), macOS, and Windows on every push
+(`OSQUERY_SYS_FORCE_SOURCE_BUILD=1` is set there specifically so it keeps
+testing that path even once real prebuilt releases exist). A separate
+workflow
 (`.github/workflows/release.yml`) builds, packages, and publishes prebuilt
 bundles whenever a version tag is pushed -- see "Release process" below.
 All of this is new and, as of this writing, **unverified against real CI

@@ -64,6 +64,40 @@ jobs:
             bash .github/scripts/manylinux-entrypoint.sh \
             bash .github/scripts/linux-cargo-build-test.sh
 
+  linux-arm64:
+    name: Linux (aarch64)
+    # GitHub's own native arm64-hosted Linux runner (GA for both public and
+    # private repos as of 2026-01) -- NOT emulation, a real aarch64 host, so
+    # this exercises the aarch64 osquery-toolchain/manylinux2014 path
+    # directly rather than through QEMU. Label is `ubuntu-24.04-arm` (no
+    # "64" suffix despite being arm64 -- that's just GitHub's naming).
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Restore osquery source + native build cache
+        uses: actions/cache@v6
+        with:
+          path: target/osquery-sys
+          key: osquery-sys-linux-arm64-${{ hashFiles('osquery-sys/build.rs') }}
+
+      - name: Build + test inside manylinux2014 (glibc 2.17 floor)
+        # See the x86_64 Linux job above for why this runs via a manual
+        # `docker run` rather than the job-level `container:` key -- same
+        # reasoning applies here. manylinux-entrypoint.sh detects the
+        # container's own architecture (via `uname -m`) and picks the
+        # matching osquery-toolchain release itself; no aarch64-specific
+        # handling needed here beyond the image tag.
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:${{ github.workspace }}" \
+            -w "${{ github.workspace }}" \
+            -e OSQUERY_SYS_FORCE_SOURCE_BUILD \
+            quay.io/pypa/manylinux2014_aarch64 \
+            bash .github/scripts/manylinux-entrypoint.sh \
+            bash .github/scripts/linux-cargo-build-test.sh
+
   macos:
     name: macOS (aarch64)
     runs-on: macos-14
