@@ -59,12 +59,13 @@ const OSQUERY_TAG: &str = "5.23.1";
 const OSQUERY_REPO_URL: &str = "https://github.com/osquery/osquery.git";
 
 /// Target triples this crate ships a prebuilt bundle for -- exactly the
-/// three platforms `.github/workflows/release.yml` builds. Anything else
-/// (e.g. `aarch64-unknown-linux-gnu`, `x86_64-apple-darwin`) automatically
-/// routes to the from-source path in `main`, extended by adding a new CI
-/// job and appending its target triple here, nothing else.
+/// four target triples `.github/workflows/release.yml` builds. Anything
+/// else (e.g. `x86_64-apple-darwin`, `aarch64-unknown-linux-musl`)
+/// automatically routes to the from-source path in `main`, extended by
+/// adding a new CI job and appending its target triple here, nothing else.
 const PREBUILT_TARGETS: &[&str] = &[
     "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
     "aarch64-apple-darwin",
     "x86_64-pc-windows-msvc",
 ];
