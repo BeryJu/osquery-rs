@@ -216,7 +216,7 @@ jobs:
 
   finalize:
     name: Commit checksums, upload release, verify, publish
-    needs: [build-linux, build-linux-arm64, build-macos, build-windows]
+    needs: [build-linux, build-linux-arm64, build-macos]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -243,7 +243,7 @@ jobs:
           set -eux
           VERSION="${GITHUB_REF_NAME#v}"
           CHECKSUMS="osquery-sys/prebuilt-checksums.v1"
-          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu aarch64-apple-darwin x86_64-pc-windows-msvc; do
+          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu aarch64-apple-darwin; do
             hash=$(cat "dist/osquery-sys-${VERSION}-${target}.sha256")
             # Drop any existing line for this exact target (e.g. re-tagging
             # the same version after fixing a release problem), then
@@ -285,7 +285,7 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           rm -rf verify && mkdir verify
           gh release download "${{ github.ref_name }}" --dir verify --pattern "*.tar.zst"
-          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu aarch64-apple-darwin x86_64-pc-windows-msvc; do
+          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu aarch64-apple-darwin; do
             expected=$(cat "dist/osquery-sys-${VERSION}-${target}.sha256")
             actual=$(sha256sum "verify/osquery-sys-${VERSION}-${target}.tar.zst" | awk '{print $1}')
             if [ "$expected" != "$actual" ]; then
