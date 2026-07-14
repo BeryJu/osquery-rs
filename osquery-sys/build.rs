@@ -166,7 +166,6 @@ fn main() {
     if cfg!(target_os = "linux") {
         append_linux_default_linker_items(&mut items, sysroot.as_deref());
     }
-    force_whole_archive_workaround(&mut items);
 
     // shim.cpp includes osquery/core/flags.h, sql.h, etc., which transitively
     // pull in third-party headers (boost, rapidjson, ...) via the same
@@ -203,6 +202,11 @@ fn main() {
         &compile_compat_stubs(&shim_dir, &cxx_compiler),
         false,
     ));
+    // Applied after compat_stubs is pushed (not before, as an earlier
+    // version of this workaround did) -- see force_whole_archive_workaround's
+    // own doc comment for why compat_stubs specifically needs
+    // .cargo_metadata(false) on its cc::Build for this to be safe.
+    force_whole_archive_workaround(&mut items);
 
     emit_link_items(&items);
 
@@ -277,7 +281,6 @@ fn try_prebuilt(cache_root: &Path, src_dir: &Path, shim_dir: &Path) -> PrebuiltA
     let manifest = parse_manifest(&manifest_text, &bundle_dir);
 
     let mut items = manifest.items;
-    force_whole_archive_workaround(&mut items);
     // Recompiled fresh locally every time, prebuilt path or not -- see
     // stage_prebuilt_package's own doc comment for why this (and the rest
     // of the shim) is never itself part of the bundle.
@@ -285,6 +288,7 @@ fn try_prebuilt(cache_root: &Path, src_dir: &Path, shim_dir: &Path) -> PrebuiltA
         &compile_compat_stubs(shim_dir, &manifest.cxx_compiler),
         false,
     ));
+    force_whole_archive_workaround(&mut items);
     emit_link_items(&items);
 
     compile_shim(
@@ -1205,18 +1209,24 @@ fn emit_link_items(items: &[LinkItem]) {
 /// stronger request that can only ever pull in a superset of what plain
 /// resolution would (larger binary, never a functional regression).
 ///
-/// Applied to `items` *before* compat_stubs gets pushed onto it (not
-/// inside `emit_link_items` itself, which both callers also use to emit
-/// that entry): the `cc` crate's own `Build::compile` call inside
-/// `compile_compat_stubs` already auto-emits its own plain
-/// `cargo:rustc-link-lib=static=osquery_embed_compat_stubs` directive as a
-/// side effect, completely independent of the explicit
-/// `link_item_for_archive`/`emit_link_items` path -- forcing *that* one to
-/// `+whole-archive` too would make the same library name appear on the
-/// command line with two different modifiers, which rustc hard-errors on
-/// ("overriding linking modifiers from command line is not supported").
-/// Confirmed exactly this way on a real CI run before narrowing the scope
-/// to here.
+/// Must be applied to `items` *after* compat_stubs gets pushed onto it, not
+/// before: an earlier version of this workaround ran before that push
+/// (compat_stubs staying unforced/plain), which surfaced a second, distinct
+/// bug -- compat_stubs.cpp's own `sysctl()` stub (needed because
+/// `osquery/tables/system/linux/sysctl_utils.cpp` references a symbol
+/// glibc removed years ago; see compat_stubs.cpp's own comment) is *also* a
+/// plain entry, so it was *also* silently dropped by the exact same
+/// propagation bug this whole workaround exists to route around --
+/// confirmed via a real CI run failing on undefined references to
+/// `sysctl`/several `@GLIBC_PRIVATE` symbols pulled in from
+/// `libc++abi.a(libunwind.cpp.o)` once whole-archiving finally let that
+/// object's dead, `__APPLE__`-only code path (never referenced under
+/// ordinary selective linking) get included too. Since `compile_compat_stubs`
+/// now passes `.cargo_metadata(false)` to suppress the `cc` crate's own
+/// automatic (and unavoidably plain) emission for that one archive, its
+/// *only* emission is now the explicit, force-eligible one here -- so
+/// applying this after the push, rather than before, correctly includes it
+/// with no modifier-conflict risk.
 fn force_whole_archive_workaround(items: &mut [LinkItem]) {
     if env::var("TARGET").as_deref() != Ok("aarch64-unknown-linux-gnu") {
         return;
@@ -1721,12 +1731,24 @@ fn compile_shim(
 /// returning the resulting archive's path so it can be appended to the end
 /// of the link item list explicitly rather than left to Cargo's own (early)
 /// placement.
+///
+/// `.cargo_metadata(false)` suppresses `cc::Build::compile`'s own automatic
+/// `cargo:rustc-link-lib=static=osquery_embed_compat_stubs`/
+/// `cargo:rustc-link-search=...` emission -- the caller pushes this
+/// archive's path into its own `items` list and emits it explicitly via
+/// `emit_link_items` instead (see that call site's own comment for why:
+/// this archive specifically needs `force_whole_archive_workaround` on
+/// aarch64, and having *two* separate emission sources for the same
+/// library name with different modifiers is exactly what previously made
+/// rustc hard-error with "overriding linking modifiers from command line
+/// is not supported").
 fn compile_compat_stubs(shim_dir: &Path, cxx_compiler: &Path) -> PathBuf {
     let mut build = cc::Build::new();
     build
         .cpp(true)
         .file(shim_dir.join("compat_stubs.cpp"))
-        .std("c++17");
+        .std("c++17")
+        .cargo_metadata(false);
     if !cfg!(windows) {
         // On non-Windows we already resolved the exact compiler CMake used
         // (matters for ABI consistency, see compile_shim); on Windows,
