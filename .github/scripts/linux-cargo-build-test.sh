@@ -47,14 +47,47 @@ trap 'kill "$HEARTBEAT_PID" 2>/dev/null || true' EXIT
 # only happens on this aarch64/AlmaLinux9 combination; every other
 # platform works unmodified with this exact same script/build.rs.
 #
-# Next step: get Cargo's own internal reasoning instead of guessing
-# again -- CARGO_LOG (not RUST_LOG, which Cargo deliberately avoids so
-# it doesn't collide with a built program's own logging) enables
-# Cargo's own env_logger-based tracing. Scoped to aarch64 only so the
-# already-working x86_64 path (which also runs this same script) stays
-# untouched and its log stays readable.
+# CARGO_LOG=cargo::core::compiler=trace (added for the previous round)
+# ruled out the leading theory at the time: that osquery-sys appearing as
+# two different Cargo Units (Host-kind, where its build script actually
+# runs, vs Target-kind, referenced via the smoke/osquery dependency edge)
+# meant native-lib flags never reached the Target-kind copy. A clean,
+# fast local repro (a 2-crate links="" workspace, built for real on
+# aarch64 hardware via Docker -- no CI round needed) disproved this: both
+# a plain `cargo:rustc-link-lib` and the `+whole-archive` modifier this
+# project actually uses propagate correctly through to a downstream
+# --test binary's real link, even though (exactly as seen here) the
+# intermediate compile's own rustc command line never shows the -l flag
+# directly -- that's normal Cargo behavior (flags flow through rlib
+# metadata into the final `cc` invocation the compiler spawns
+# internally, not onto the outer rustc command line cargo -vv echoes).
+#
+# Cross-checking the actual failing link against osquery-sys's own full,
+# correctly-ordered 151-entry -l list (reconstructed from CARGO_LOG's
+# trace, carefully handling the quoted `-l 'static:+whole-archive=name'`
+# form that a naive grep misses) shows the visible portion matches
+# exactly, in the right order, and CMake's own build log confirms every
+# relevant component archive (osquery_sql, osquery_core,
+# thirdparty_sqlite -- providers of the specific missing symbols) links
+# successfully with no errors anywhere in the CMake/make phase. So the
+# native-lib propagation mechanism itself isn't the bug, and the
+# libraries genuinely get built.
+#
+# What's NOT yet confirmed: whether the *actual* failing link command
+# really does include thirdparty_sqlite/osquery_core, since rustc's own
+# error-message renderer self-truncates a command this long (literally:
+# "<N object files omitted>" / "some arguments are omitted, use
+# `--verbose` to show all linker arguments") -- CARGO_LOG showed the
+# *emitted* directives, not proof of what's in the real, final,
+# already-abbreviated-by-rustc error text. RUSTFLAGS=--verbose (rustc's
+# own flag, distinct from cargo's -vv) makes rustc print that error
+# message in full instead of abbreviating it, closing this gap directly
+# rather than continuing to reason about it indirectly. Scoped to
+# aarch64 only so the already-working x86_64 path (which also runs this
+# same script) stays untouched and its log stays readable.
 if [ "$(uname -m)" = "aarch64" ]; then
   export CARGO_LOG=cargo::core::compiler=trace
+  export RUSTFLAGS="--verbose"
 fi
 
 cargo test -p osquery --features integration-tests -vv -- --nocapture 2>&1 | fold -w 2000
