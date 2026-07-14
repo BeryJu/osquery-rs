@@ -704,6 +704,7 @@ fn ensure_osquery_source(dest: &Path) -> bool {
 /// build.rs never double-patches.
 fn apply_local_patches(src_dir: &Path) {
     patch_boost_mpl_enum_constexpr_conversion(src_dir);
+    patch_boost_numeric_conversion_mixture_enums(src_dir);
 }
 
 /// Boost.MPL's integral_wrapper.hpp computes value+1/value-1 for every
@@ -756,6 +757,54 @@ fn patch_boost_mpl_enum_constexpr_conversion(src_dir: &Path) {
         .replacen(close_marker, close_replacement, 1);
     fs::write(&path, patched)
         .unwrap_or_else(|e| panic!("failed to write patched {}: {e}", path.display()));
+}
+
+/// Boost.MPL's `integral_c<EnumType, N>::prior` unconditionally computes
+/// `static_cast<EnumType>(N - 1)`, including at `N == 0`. For an unscoped
+/// enum without a fixed underlying type, casting an out-of-range int to it
+/// in a constant expression is ill-formed per the standard; some Clang
+/// versions only warn (`-Wenum-constexpr-conversion`, suppressible), but at
+/// least one (a bleeding-edge Xcode beta, Apple clang 21) rejects it
+/// unconditionally and doesn't even recognize that diagnostic's name, so no
+/// amount of `-Wno-...`/pragma suppression helps there (this is the same
+/// underlying issue `patch_boost_mpl_enum_constexpr_conversion` targets, but
+/// that patch is a no-op on toolchains where the diagnostic can't be named).
+/// Giving the two specific enums shim.cpp's include graph instantiates
+/// through this path a fixed underlying type sidesteps the rule entirely --
+/// with a fixed underlying type, the enum's valid range is the underlying
+/// type's full range, so the cast is always well-formed, on every Clang.
+fn patch_boost_numeric_conversion_mixture_enums(src_dir: &Path) {
+    let base = src_dir.join(
+        "libraries/cmake/source/boost/src/libs/numeric/conversion/include/boost/numeric/conversion",
+    );
+    for (file, enum_name) in [
+        ("udt_builtin_mixture_enum.hpp", "udt_builtin_mixture_enum"),
+        ("int_float_mixture_enum.hpp", "int_float_mixture_enum"),
+    ] {
+        let path = base.join(file);
+        let contents = fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
+        let contents = contents.replace("\r\n", "\n");
+
+        let fixed_marker = format!("enum {enum_name} : int");
+        if contents.contains(&fixed_marker) {
+            continue; // already patched
+        }
+
+        let marker = format!("enum {enum_name}\n  {{");
+        let replacement = format!("enum {enum_name} : int\n  {{");
+        if !contents.contains(&marker) {
+            panic!(
+                "expected anchor text not found in {} -- osquery's vendored Boost \
+                 version may have changed; update patch_boost_numeric_conversion_mixture_enums",
+                path.display()
+            );
+        }
+
+        let patched = contents.replacen(&marker, &replacement, 1);
+        fs::write(&path, patched)
+            .unwrap_or_else(|e| panic!("failed to write patched {}: {e}", path.display()));
+    }
 }
 
 fn osqueryd_name() -> &'static str {
