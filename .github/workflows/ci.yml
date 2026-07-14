@@ -82,16 +82,11 @@ jobs:
           key: osquery-sys-linux-arm64-${{ hashFiles('osquery-sys/build.rs') }}
 
       - name: Build + test inside manylinux_2_34 (glibc 2.34 floor)
-        # Not manylinux2014/manylinux_2_28 (unlike the x86_64 job above,
-        # which uses manylinux2014): the osquery-toolchain's aarch64
-        # clang/LLVM 18.1 binary needs glibc 2.27+ to run at all, and its
-        # bundled assembler needs glibc 2.34+ (only surfaces once an actual
-        # .S file is compiled, e.g. libgcrypt's mpih-mul3-asm.S -- `clang
-        # --version` alone doesn't catch it). manylinux_2_34 satisfies both,
-        # and is also the glibc floor release.yml's aarch64 prebuilt bundle
-        # targets, so CI exercises the same container that ships. See the
-        # x86_64 Linux job above for why this runs via a manual `docker run`
-        # rather than the job-level `container:` key.
+        # Not manylinux2014 like the x86_64 job above: the toolchain's
+        # aarch64 clang/LLVM 18.1 and its bundled assembler need glibc
+        # 2.34+. Also release.yml's aarch64 glibc floor, so CI exercises
+        # the same container that ships. See the x86_64 job above for why
+        # this runs via a manual `docker run`.
         run: |
           docker run --rm \
             -v "${{ github.workspace }}:${{ github.workspace }}" \

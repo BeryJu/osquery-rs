@@ -88,13 +88,10 @@ jobs:
           key: osquery-sys-linux-arm64-${{ hashFiles('osquery-sys/build.rs') }}
 
       - name: Build osquery-sys and stage the prebuilt bundle
-        # manylinux_2_34 (glibc 2.34), not manylinux2014 (glibc 2.17) like
-        # the x86_64 job above -- the osquery-toolchain's aarch64 clang/LLVM
-        # 18.1 needs glibc 2.27+ to run and its bundled assembler needs
-        # 2.34+ (see ci.yml's aarch64 job for the full reasoning). This
-        # means the shipped aarch64 Linux artifact's glibc floor (2.34) is
-        # considerably newer than the x86_64 artifact's (2.17). Same
-        # container as ci.yml's aarch64 job, so CI exercises what ships.
+        # manylinux_2_34, not manylinux2014 like the x86_64 job above (see
+        # ci.yml's aarch64 job for why) -- so the shipped aarch64 artifact's
+        # glibc floor (2.34) is considerably newer than x86_64's (2.17).
+        # Same container as ci.yml's aarch64 job, so CI exercises what ships.
         run: |
           docker run --rm \
             -v "${{ github.workspace }}:${{ github.workspace }}" \
