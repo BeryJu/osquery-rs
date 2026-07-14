@@ -769,10 +769,16 @@ fn patch_boost_mpl_enum_constexpr_conversion(src_dir: &Path) {
 /// amount of `-Wno-...`/pragma suppression helps there (this is the same
 /// underlying issue `patch_boost_mpl_enum_constexpr_conversion` targets, but
 /// that patch is a no-op on toolchains where the diagnostic can't be named).
-/// Giving the two specific enums shim.cpp's include graph instantiates
-/// through this path a fixed underlying type sidesteps the rule entirely --
-/// with a fixed underlying type, the enum's valid range is the underlying
-/// type's full range, so the cast is always well-formed, on every Clang.
+/// Giving the specific enums this path instantiates a fixed underlying type
+/// sidesteps the rule entirely -- with a fixed underlying type, the enum's
+/// valid range is the underlying type's full range, so the cast is always
+/// well-formed, on every Clang. These three are Boost.NumericConversion's
+/// complete family of "mixture" tag enums (all in the same directory, same
+/// author, same shape); patch all of them together rather than one at a
+/// time as each is separately discovered via a different call site
+/// (`udt_builtin_mixture_enum`/`int_float_mixture_enum` reachable from
+/// shim.cpp directly, `sign_mixture_enum` only reachable via osqueryd's own
+/// full build, through Thrift's use of `boost::numeric_cast`).
 fn patch_boost_numeric_conversion_mixture_enums(src_dir: &Path) {
     let base = src_dir.join(
         "libraries/cmake/source/boost/src/libs/numeric/conversion/include/boost/numeric/conversion",
@@ -780,6 +786,7 @@ fn patch_boost_numeric_conversion_mixture_enums(src_dir: &Path) {
     for (file, enum_name) in [
         ("udt_builtin_mixture_enum.hpp", "udt_builtin_mixture_enum"),
         ("int_float_mixture_enum.hpp", "int_float_mixture_enum"),
+        ("sign_mixture_enum.hpp", "sign_mixture_enum"),
     ] {
         let path = base.join(file);
         let contents = fs::read_to_string(&path)
