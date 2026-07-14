@@ -1,19 +1,29 @@
 #![cfg(feature = "integration-tests")]
 
 use std::path::Path;
+use std::sync::OnceLock;
 
-use osquery::OsqueryInstance;
+use osquery::{OsqueryError, OsqueryInstance};
+
+static INSTANCE: OnceLock<Result<OsqueryInstance, OsqueryError>> = OnceLock::new();
+
+fn instance() -> &'static OsqueryInstance {
+    match INSTANCE.get_or_init(OsqueryInstance::start) {
+        Ok(instance) => instance,
+        Err(e) => panic!("failed to get osquery instance: {}", e),
+    }
+}
 
 #[test]
 fn select_users_no_err() {
-    let instance = OsqueryInstance::start().expect("failed to start embedded osquery");
+    let instance = instance();
 
     assert!(instance.query("SELECT * FROM users").is_ok());
 }
 
 #[test]
 fn singleton() {
-    let _instance = OsqueryInstance::start().expect("failed to start embedded osquery");
+    let _instance = instance();
 
     let second = OsqueryInstance::start();
     assert!(second.is_err(), "a second instance should be refused");
@@ -29,7 +39,7 @@ fn select_1_end_to_end_with_no_socket() {
     let osquery_home = Path::new(&home).join(".osquery");
     let before = list_em_files(&osquery_home);
 
-    let instance = OsqueryInstance::start().expect("failed to start embedded osquery");
+    let instance = instance();
 
     let result = instance
         .query("SELECT 1 AS one")
