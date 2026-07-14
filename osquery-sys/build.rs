@@ -1784,6 +1784,28 @@ fn compile_shim(
         }
     }
 
+    if cfg!(target_os = "macos") {
+        // shim.cpp transitively includes boost/mpl (via osquery/utils/expected/
+        // expected.h -> boost::variant) the same way osquery_core itself does --
+        // osquery's own libraries/cmake/source/boost/CMakeLists.txt already
+        // works around this exact issue ("silence enum constexpr conversion for
+        // MPL on Xcode 26") via a `target_compile_options(thirdparty_boost_mpl
+        // INTERFACE -Wno-enum-constexpr-conversion)`, an INTERFACE flag that
+        // only propagates to CMake targets linking against thirdparty_boost_mpl
+        // -- osquery_core's own flags.make (what `defines`/`includes` above are
+        // harvested from) only ever captures `-D`/`-I`/`-isystem` tokens, so
+        // this `-W...` flag never reaches shim.cpp's own compile even when
+        // present there. Boost.MPL/NumericConversion's `integral_c::prior`
+        // computes `value - 1` as an always-instantiated (never actually used)
+        // intermediate type at the enum's first value, producing an
+        // out-of-range enum cast; newer Clang (this diagnostic's name dates it
+        // to roughly Xcode 15+) treats that as ill-formed in a constant
+        // expression. Mirror osquery's own fix directly here rather than
+        // generalizing flag extraction to capture arbitrary `-W...` tokens
+        // from flags.make, which risks pulling in other, unrelated flags too.
+        build.flag("-Wno-enum-constexpr-conversion");
+    }
+
     build.compile("osquery_embed_shim");
 }
 
