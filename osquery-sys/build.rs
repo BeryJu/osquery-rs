@@ -166,6 +166,7 @@ fn main() {
     if cfg!(target_os = "linux") {
         append_linux_default_linker_items(&mut items, sysroot.as_deref());
     }
+    force_whole_archive_workaround(&mut items);
 
     // shim.cpp includes osquery/core/flags.h, sql.h, etc., which transitively
     // pull in third-party headers (boost, rapidjson, ...) via the same
@@ -276,6 +277,7 @@ fn try_prebuilt(cache_root: &Path, src_dir: &Path, shim_dir: &Path) -> PrebuiltA
     let manifest = parse_manifest(&manifest_text, &bundle_dir);
 
     let mut items = manifest.items;
+    force_whole_archive_workaround(&mut items);
     // Recompiled fresh locally every time, prebuilt path or not -- see
     // stage_prebuilt_package's own doc comment for why this (and the rest
     // of the shim) is never itself part of the bundle.
@@ -1155,38 +1157,6 @@ enum LinkItem {
 /// here comes from this one crate's build script, so the order we computed
 /// while parsing osquery's own link.txt is preserved exactly.
 fn emit_link_items(items: &[LinkItem]) {
-    // WORKAROUND, not a root-cause fix: on aarch64-unknown-linux-gnu
-    // specifically, every plain (non-whole-archive) `cargo:rustc-link-lib`
-    // directive this function emits reproducibly fails to reach the
-    // downstream `smoke`/`osquery` test binary's real link -- confirmed via
-    // RUSTFLAGS=--verbose showing the actual, non-abbreviated failing link
-    // command contains exactly the whole-archive'd archives and *zero*
-    // plain ones (not thirdparty_sqlite, not osquery_core, not even the
-    // final -lc++/-lc). Extensively ruled out as the cause, each via a
-    // clean local repro that reproduces every other dimension of this
-    // project's real build but still links correctly on real aarch64
-    // hardware: a Cargo Host/Target Unit-kind duplication, the
-    // `+whole-archive` modifier mechanism itself, small- and full-scale
-    // (151-entry) directive counts, the exact manylinux_2_34_aarch64
-    // container/pinned Rust 1.97.0 toolchain/gcc-toolset-14 linker, real
-    // Cargo build parallelism (CARGO_BUILD_JOBS=1 on the real CI build did
-    // not fix it either), and 80,000 lines of non-"cargo:"-prefixed stdout
-    // volume before the real directives (simulating the real CMake build's
-    // own forwarded output). The root cause remains unidentified, but
-    // `+whole-archive` propagation has a 100% success rate everywhere this
-    // was tested (repro and real CI alike) versus 100% failure for plain
-    // propagation on this specific target -- and whole-archive is already
-    // documented above as a strictly stronger request that can only ever
-    // pull in a superset of what plain resolution would (larger binary,
-    // never a functional regression). Forcing every static lib to
-    // whole-archive here sidesteps the bug directly rather than continuing
-    // to chase its root cause. Scoped tightly to aarch64-unknown-linux-gnu
-    // via TARGET (not `cfg!`, which reflects the build script's own host,
-    // not necessarily the crate's target) so macOS/Windows/x86_64 Linux,
-    // all already working, are completely unaffected.
-    let force_whole_archive =
-        env::var("TARGET").as_deref() == Ok("aarch64-unknown-linux-gnu");
-
     for item in items {
         match item {
             LinkItem::StaticLib {
@@ -1194,9 +1164,8 @@ fn emit_link_items(items: &[LinkItem]) {
                 name,
                 whole_archive,
             } => {
-                let whole_archive = *whole_archive || force_whole_archive;
                 println!("cargo:rustc-link-search=native={}", dir.display());
-                if whole_archive {
+                if *whole_archive {
                     println!("cargo:rustc-link-lib=static:+whole-archive={name}");
                 } else {
                     println!("cargo:rustc-link-lib=static={name}");
@@ -1208,6 +1177,53 @@ fn emit_link_items(items: &[LinkItem]) {
             LinkItem::Framework(name) => {
                 println!("cargo:rustc-link-lib=framework={name}");
             }
+        }
+    }
+}
+
+/// WORKAROUND, not a root-cause fix: on aarch64-unknown-linux-gnu
+/// specifically, every plain (non-whole-archive) `cargo:rustc-link-lib`
+/// directive `emit_link_items` prints reproducibly fails to reach the
+/// downstream `smoke`/`osquery` test binary's real link -- confirmed via
+/// RUSTFLAGS=--verbose showing the actual, non-abbreviated failing link
+/// command contains exactly the whole-archive'd archives and *zero* plain
+/// ones (not thirdparty_sqlite, not osquery_core, not even the final
+/// -lc++/-lc). Extensively ruled out as the cause, each via a clean local
+/// repro that reproduces every other dimension of this project's real
+/// build but still links correctly on real aarch64 hardware: a Cargo
+/// Host/Target Unit-kind duplication, the `+whole-archive` modifier
+/// mechanism itself, small- and full-scale (151-entry) directive counts,
+/// the exact manylinux_2_34_aarch64 container/pinned Rust 1.97.0
+/// toolchain/gcc-toolset-14 linker, real Cargo build parallelism
+/// (CARGO_BUILD_JOBS=1 on the real CI build did not fix it either), and
+/// 80,000 lines of non-"cargo:"-prefixed stdout volume before the real
+/// directives (simulating the real CMake build's own forwarded output).
+/// The root cause remains unidentified, but `+whole-archive` propagation
+/// has a 100% success rate everywhere this was tested (repro and real CI
+/// alike) versus 100% failure for plain propagation on this specific
+/// target -- and whole-archive is already documented above as a strictly
+/// stronger request that can only ever pull in a superset of what plain
+/// resolution would (larger binary, never a functional regression).
+///
+/// Applied to `items` *before* compat_stubs gets pushed onto it (not
+/// inside `emit_link_items` itself, which both callers also use to emit
+/// that entry): the `cc` crate's own `Build::compile` call inside
+/// `compile_compat_stubs` already auto-emits its own plain
+/// `cargo:rustc-link-lib=static=osquery_embed_compat_stubs` directive as a
+/// side effect, completely independent of the explicit
+/// `link_item_for_archive`/`emit_link_items` path -- forcing *that* one to
+/// `+whole-archive` too would make the same library name appear on the
+/// command line with two different modifiers, which rustc hard-errors on
+/// ("overriding linking modifiers from command line is not supported").
+/// Confirmed exactly this way on a real CI run before narrowing the scope
+/// to here.
+fn force_whole_archive_workaround(items: &mut [LinkItem]) {
+    if env::var("TARGET").as_deref() != Ok("aarch64-unknown-linux-gnu") {
+        return;
+    }
+    for item in items {
+        if let LinkItem::StaticLib { whole_archive, .. } = item {
+            *whole_archive = true;
         }
     }
 }
