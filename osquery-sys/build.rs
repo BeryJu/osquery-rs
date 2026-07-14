@@ -342,6 +342,7 @@ fn download_and_verify_bundle(target: &str, version: &str, bundle_dir: &Path) ->
 
     let mut bytes = Vec::new();
     response
+        .into_body()
         .into_reader()
         .read_to_end(&mut bytes)
         .map_err(|e| format!("failed to read downloaded bundle from {url}: {e}"))?;
