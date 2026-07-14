@@ -192,6 +192,8 @@ fn main() {
             sysroot.as_deref(),
             &defines,
             &includes,
+            &src_dir,
+            &build_dir,
         );
     }
 
@@ -441,7 +443,7 @@ fn parse_manifest(contents: &str, bundle_dir: &Path) -> PrebuiltManifest {
             cxx_includes = rest
                 .split('\t')
                 .filter(|s| !s.is_empty())
-                .map(String::from)
+                .map(|s| rejoin_bundle_include_token(s, bundle_dir))
                 .collect();
         } else if line.starts_with('#') || line.trim().is_empty() {
             continue;
@@ -503,9 +505,56 @@ fn stage_prebuilt_package(
     sysroot: Option<&Path>,
     defines: &[String],
     includes: &[String],
+    src_dir: &Path,
+    build_dir: &Path,
 ) {
     let lib_dir = package_dir.join("lib");
     fs::create_dir_all(&lib_dir).unwrap_or_else(|e| panic!("failed to create {}: {e}", lib_dir.display()));
+    let bundle_include_dir = package_dir.join("include");
+
+    // `includes` alternates "-Ipath" single tokens with "-isystem"/"path"
+    // token *pairs* (confirmed directly from real manifest.v1 content) --
+    // walk with an explicit cursor rather than `.map()` so a pair's two
+    // tokens are classified/dropped together. Every path gets bundled
+    // (see bundle_include_path) rather than staying a raw absolute path
+    // from this machine, which a consumer could never resolve.
+    let mut copied_include_dirs: HashSet<PathBuf> = HashSet::new();
+    let mut rewritten_includes: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < includes.len() {
+        let tok = includes[i].as_str();
+        if tok == "-isystem" {
+            let path_str = includes
+                .get(i + 1)
+                .unwrap_or_else(|| panic!("dangling -isystem with no following path in cxx_includes"));
+            if let Some(rewritten) = bundle_include_path(
+                path_str,
+                src_dir,
+                build_dir,
+                &bundle_include_dir,
+                &mut copied_include_dirs,
+            ) {
+                rewritten_includes.push("-isystem".to_string());
+                rewritten_includes.push(rewritten);
+            }
+            i += 2;
+        } else if let Some(path_str) = tok.strip_prefix("-I") {
+            if let Some(rewritten) = bundle_include_path(
+                path_str,
+                src_dir,
+                build_dir,
+                &bundle_include_dir,
+                &mut copied_include_dirs,
+            ) {
+                rewritten_includes.push(format!("-I{rewritten}"));
+            }
+            i += 1;
+        } else {
+            // Unrecognized token shape -- keep as-is defensively.
+            rewritten_includes.push(tok.to_string());
+            i += 1;
+        }
+    }
 
     let mut manifest = String::new();
     manifest.push_str("# osquery-sys prebuilt bundle manifest, schema v1\n");
@@ -515,8 +564,11 @@ fn stage_prebuilt_package(
         "# sysroot={}\n",
         sysroot.map(|p| p.display().to_string()).unwrap_or_default()
     ));
+    // cxx_defines are all `-DNAME[=value]` flags (audited directly against
+    // real manifest content) -- never filesystem paths, so unlike
+    // cxx_includes below, these need no rewriting.
     manifest.push_str(&format!("# cxx_defines={}\n", defines.join("\t")));
-    manifest.push_str(&format!("# cxx_includes={}\n", includes.join("\t")));
+    manifest.push_str(&format!("# cxx_includes={}\n", rewritten_includes.join("\t")));
 
     let mut used_names: HashSet<String> = HashSet::new();
     for item in items {
@@ -1881,5 +1933,103 @@ fn find_file_named(root: &Path, name: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Recursively copies every file under `src` into `dst`, creating
+/// directories as needed. Used by `bundle_include_path` to stage a
+/// still-needed include directory into a prebuilt package.
+fn copy_dir_all(src: &Path, dst: &Path) {
+    fs::create_dir_all(dst).unwrap_or_else(|e| panic!("failed to create {}: {e}", dst.display()));
+    let entries =
+        fs::read_dir(src).unwrap_or_else(|e| panic!("failed to read dir {}: {e}", src.display()));
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let dest_path = dst.join(entry.file_name());
+        if path.is_dir() {
+            copy_dir_all(&path, &dest_path);
+        } else {
+            fs::copy(&path, &dest_path).unwrap_or_else(|e| {
+                panic!("failed to copy {} to {}: {e}", path.display(), dest_path.display())
+            });
+        }
+    }
+}
+
+/// Classifies a `cxx_includes` path token (already stripped of any leading
+/// `-I`/`-isystem`) against `build_dir`/`src_dir` and either bundles it into
+/// `package_dir/include/...` (returning the bundle-relative `include/...`
+/// replacement, copying it at most once per unique source directory via
+/// `copied`) or drops it entirely (returning `None`).
+///
+/// Dropped: CMake's own `ns_*`-prefixed virtual-namespace directories
+/// (`cmake/utilities.cmake`'s include-namespace helper -- symlink farms
+/// that just re-expose `src_dir`'s own real headers under a per-target
+/// path, for CMake's own build organization) and `installed_formulas`
+/// (osquery's own CMake-built OpenSSL headers). Both are build-tree-only
+/// and confirmed, via a real compile of shim.cpp/compat_stubs.cpp with
+/// neither present, to be unneeded: `compile_shim`'s own `.include(src_dir)`
+/// call already covers everything the `ns_*` dirs would have symlinked
+/// back to, and neither file includes anything from OpenSSL directly.
+///
+/// Everything else gets bundled, whether it points into the CMake build
+/// tree (e.g. glog's own `log_severity.h`, placed by a real
+/// `configure_file(... COPYONLY)` at CMake configure time -- genuinely
+/// can't be reconstructed without running CMake) or the plain git-cloned
+/// source tree (third-party headers living in a git submodule --
+/// `ensure_osquery_source`'s lightweight clone never runs `git submodule
+/// update`, so a consumer's own local checkout won't have this content
+/// either). Bundling is the only option that's independent of both.
+fn bundle_include_path(
+    path_str: &str,
+    src_dir: &Path,
+    build_dir: &Path,
+    bundle_include_dir: &Path,
+    copied: &mut HashSet<PathBuf>,
+) -> Option<String> {
+    let path = Path::new(path_str);
+
+    let relative = if let Ok(rel) = path.strip_prefix(build_dir) {
+        let first = rel.components().next().and_then(|c| c.as_os_str().to_str());
+        if matches!(first, Some(name) if name.starts_with("ns_") || name == "installed_formulas") {
+            return None;
+        }
+        rel
+    } else if let Ok(rel) = path.strip_prefix(src_dir) {
+        rel
+    } else {
+        // Defensive fallback: every include token seen in a real manifest
+        // falls under build_dir or src_dir. Pass an unrecognized one
+        // through unchanged rather than panicking a release build over a
+        // genuinely novel case -- no worse than the pre-bundling behavior.
+        return Some(path_str.to_string());
+    };
+
+    if copied.insert(path.to_path_buf()) {
+        copy_dir_all(path, &bundle_include_dir.join(relative));
+    }
+
+    // Always `/`-joined, never OS-native-separator-joined: this string is
+    // written into manifest.v1 and may be read back on a different OS than
+    // the one that staged it (e.g. built on Linux, consumed on Windows).
+    let portable_relative = relative
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
+    Some(format!("include/{portable_relative}"))
+}
+
+/// Rejoins a manifest-recorded `cxx_includes` token against `bundle_dir` if
+/// it uses `bundle_include_path`'s `include/...` convention; passes
+/// anything else (the bare `-isystem` flag word, or an unrecognized-token
+/// absolute-path fallback) through unchanged.
+fn rejoin_bundle_include_token(token: &str, bundle_dir: &Path) -> String {
+    if let Some(rel) = token.strip_prefix("-Iinclude/") {
+        return format!("-I{}", bundle_dir.join("include").join(rel).display());
+    }
+    if let Some(rel) = token.strip_prefix("include/") {
+        return bundle_dir.join("include").join(rel).display().to_string();
+    }
+    token.to_string()
 }
 
