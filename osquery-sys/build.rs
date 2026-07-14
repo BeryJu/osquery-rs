@@ -1640,19 +1640,37 @@ fn append_linux_default_linker_items(items: &mut Vec<LinkItem>, sysroot: Option<
     // force_whole_archive_workaround (see its own doc comment) whole-archives
     // both of these on aarch64-unknown-linux-gnu, which exposes a real
     // duplicate: this toolchain's libc++.a and libc++abi.a each separately
-    // bundle a full copy of LLVM's libunwind (libunwind.cpp.o), normally
-    // invisible because selective (non-whole-archive) linking only ever
-    // pulls in whichever copy is needed first. Whole-archiving both makes
-    // ld see the exact same object defined twice ("multiple definition of
-    // `__unw_init_local'", `logAPIs`, etc.) -- confirmed via a real CI run.
-    // Both copies are built from the identical upstream source, so keeping
-    // either is equivalent; strip it from libc++.a specifically (leaving
-    // libc++abi.a's copy, matching upstream LLVM's usual convention of
-    // libc++abi being the unwinder's canonical home) so whole-archiving
-    // both is safe. Scoped to aarch64 like the workaround it exists to
-    // support -- x86_64 never whole-archives these, so never hits this.
+    // bundle a full copy of LLVM's libunwind, split across these 9 object
+    // files (the complete set, confirmed directly via `ar t` against both
+    // archives and diffing their member lists -- not just libunwind.cpp.o,
+    // which was the first one found via a real CI failure and turned out to
+    // be only one of several), normally invisible because selective
+    // (non-whole-archive) linking only ever pulls in whichever copy is
+    // needed first. Whole-archiving both makes ld see the exact same
+    // objects defined twice ("multiple definition of `__unw_init_local'",
+    // `_Unwind_RaiseException`, etc.) -- confirmed via real CI runs. Both
+    // copies are built from the identical upstream source, so keeping
+    // either is equivalent; strip all of them from libc++.a specifically
+    // (leaving libc++abi.a's copies, matching upstream LLVM's usual
+    // convention of libc++abi being the unwinder's canonical home) so
+    // whole-archiving both is safe. Scoped to aarch64 like the workaround
+    // it exists to support -- x86_64 never whole-archives these, so never
+    // hits this.
+    const LIBUNWIND_OBJECTS_DUPLICATED_IN_LIBCXX: &[&str] = &[
+        "libunwind.cpp.o",
+        "Unwind-EHABI.cpp.o",
+        "UnwindLevel1.c.o",
+        "UnwindLevel1-gcc-ext.c.o",
+        "UnwindRegistersRestore.S.o",
+        "UnwindRegistersSave.S.o",
+        "Unwind-seh.cpp.o",
+        "Unwind-sjlj.c.o",
+        "Unwind-wasm.c.o",
+    ];
     if env::var("TARGET").as_deref() == Ok("aarch64-unknown-linux-gnu") {
-        strip_archive_member_if_present(&libcxx, "libunwind.cpp.o");
+        for member in LIBUNWIND_OBJECTS_DUPLICATED_IN_LIBCXX {
+            strip_archive_member_if_present(&libcxx, member);
+        }
     }
 
     items.push(link_item_for_archive(&libcxx, false));
