@@ -26,9 +26,11 @@ full fallback behavior and what's still required even on the prebuilt
 path.
 
 **CI** (`.github/workflows/ci.yml`) exercises the from-source build/test on
-Linux, macOS, and Windows on every push (`OSQUERY_SYS_FORCE_SOURCE_BUILD=1`
-is set there specifically so it keeps testing that path even once real
-prebuilt releases exist). A separate workflow
+Linux (x86_64 and aarch64, the latter on GitHub's native arm64-hosted
+runners), macOS, and Windows on every push
+(`OSQUERY_SYS_FORCE_SOURCE_BUILD=1` is set there specifically so it keeps
+testing that path even once real prebuilt releases exist). A separate
+workflow
 (`.github/workflows/release.yml`) builds, packages, and publishes prebuilt
 bundles whenever a version tag is pushed -- see "Release process" below.
 All of this is new and, as of this writing, **unverified against real CI
@@ -203,7 +205,7 @@ by default it looks at `/usr/local/osquery-toolchain`
   triggered submodule fetches) would fail there, same as many heavy `-sys`
   crates. Not yet addressed (a `DOCS_RS` env var check to skip both and
   emit stub bindings would be the standard fix, if this becomes a problem).
-- **Prebuilt bundles only cover 3 target triples** (see "Default path:
+- **Prebuilt bundles only cover 4 target triples** (see "Default path:
   prebuilt download" above) -- anything else falls back to a from-source
   build automatically, with an informational `cargo:warning`.
 - **Windows requires a static CRT (`+crt-static`)**: osquery's own CMake
@@ -231,7 +233,7 @@ by default it looks at `/usr/local/osquery-toolchain`
    there) to the same new value. Commit.
 2. Tag that commit `v<version>` (e.g. `v0.2.0`) and push the tag.
 3. `.github/workflows/release.yml` takes over automatically: builds
-   osquery from source on all 3 platforms, packages each into a prebuilt
+   osquery from source for all 4 target triples, packages each into a prebuilt
    bundle, uploads them as a **draft** GitHub Release, commits the
    computed checksums to `osquery-sys/prebuilt-checksums.v1` on `main`,
    re-downloads and re-verifies every uploaded asset against those same
@@ -344,8 +346,9 @@ by default it looks at `/usr/local/osquery-toolchain`
 2. **Stage 2 (in progress)**: prebuilt-artifact distribution (this
    document's "Default path: prebuilt download" and "Release process"
    sections) -- implemented, but unverified against a real tag push/release
-   as of this writing. Also: generalize the query API further (e.g. typed
-   columns), get a fully green CI run on all 3 platforms.
+   as of this writing. CI is fully green on all 4 target triples (Linux
+   x86_64 and aarch64, macOS, Windows -- build + integration tests). Also:
+   generalize the query API further (e.g. typed columns).
 3. **Stage 3**: expose more `Initializer`/config knobs as real usage
    demands.
 
