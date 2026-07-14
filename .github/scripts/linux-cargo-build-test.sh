@@ -73,21 +73,46 @@ trap 'kill "$HEARTBEAT_PID" 2>/dev/null || true' EXIT
 # native-lib propagation mechanism itself isn't the bug, and the
 # libraries genuinely get built.
 #
-# What's NOT yet confirmed: whether the *actual* failing link command
-# really does include thirdparty_sqlite/osquery_core, since rustc's own
-# error-message renderer self-truncates a command this long (literally:
-# "<N object files omitted>" / "some arguments are omitted, use
-# `--verbose` to show all linker arguments") -- CARGO_LOG showed the
-# *emitted* directives, not proof of what's in the real, final,
-# already-abbreviated-by-rustc error text. RUSTFLAGS=--verbose (rustc's
-# own flag, distinct from cargo's -vv) makes rustc print that error
-# message in full instead of abbreviating it, closing this gap directly
-# rather than continuing to reason about it indirectly. Scoped to
-# aarch64 only so the already-working x86_64 path (which also runs this
-# same script) stays untouched and its log stays readable.
+# RUSTFLAGS=--verbose (rustc's own flag, distinct from cargo's -vv) got
+# rustc's error-message renderer to print the failing link command in
+# full instead of self-truncating it ("<N object files omitted>"/"some
+# arguments are omitted"). Result: the real command has exactly the 29
+# `+whole-archive`-modified archives osquery-sys's build script emits,
+# and *zero* of the ~120 plain (non-whole-archive) `-l static=NAME`
+# entries -- not thirdparty_sqlite, not osquery_core, not even the final
+# -lc++/-lc/-lpthread system libs. So propagation genuinely is dropping
+# every plain entry on this build, contradicting the clean small-scale
+# repro (2 crates, still exactly reproduces this project's real
+# `links=`/`+whole-archive` mix, directive count of 151, and even
+# per-library long/distinct -L search-path directories matching this
+# project's real CMake build-tree layout) -- which links correctly every
+# time, run inside the identical manylinux_2_34_aarch64 container with
+# the identical pinned Rust 1.97.0 toolchain and gcc-toolset-14 linker.
+#
+# The one dimension that small repro cannot replicate is real build
+# parallelism: it has only 2 crates, essentially no concurrent jobs,
+# while this project's actual build compiles 100+ units concurrently.
+# If Cargo's own (Rust-implemented) aggregation of a build script's
+# stdout-parsed directives into its shared build-plan state has a rare
+# thread-safety bug that happens to be masked by x86_64's stronger
+# memory-ordering model but surfaces under aarch64's weaker one, it
+# would need real concurrent load to trigger -- exactly what the repro
+# lacks and this real build has. --jobs 1 forces fully serial
+# compilation to test that directly: if the failure disappears, that's
+# a real, actionable finding (serialize aarch64 CI permanently, and/or
+# report a reproducible upstream Cargo bug) rather than another guess.
+# Scoped to aarch64 only so the already-working x86_64 path (which also
+# runs this same script) stays untouched, fast, and its log stays
+# readable.
 if [ "$(uname -m)" = "aarch64" ]; then
-  export CARGO_LOG=cargo::core::compiler=trace
-  export RUSTFLAGS="--verbose"
+  # OSQUERY_SYS_CMAKE_JOBS keeps the (already multi-hour) CMake/C++ build
+  # at a normal parallelism level -- Cargo itself always recomputes and
+  # overwrites NUM_JOBS (which build.rs would otherwise read for CMake's
+  # own -j flag) to match CARGO_BUILD_JOBS for every build script
+  # invocation, confirmed directly by exporting NUM_JOBS locally and
+  # observing Cargo overwrite it -- see build.rs's num_jobs() comment.
+  export OSQUERY_SYS_CMAKE_JOBS=5
+  export CARGO_BUILD_JOBS=1
 fi
 
 cargo test -p osquery --features integration-tests -vv -- --nocapture 2>&1 | fold -w 2000

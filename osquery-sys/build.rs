@@ -1061,13 +1061,25 @@ fn num_jobs() -> String {
     // per core) can exceed that even on machines with plenty of cores but
     // constrained memory (e.g. a capped Docker Desktop VM). Default to a
     // conservative cap and let callers with more memory raise it.
-    env::var("NUM_JOBS").unwrap_or_else(|_| {
-        std::thread::available_parallelism()
-            .map(|n| n.get().min(4))
-            .unwrap_or(4)
-            .add(1)
-            .to_string()
-    })
+    //
+    // OSQUERY_SYS_CMAKE_JOBS overrides NUM_JOBS specifically for this
+    // CMake build, independent of Cargo's own `--jobs`/CARGO_BUILD_JOBS --
+    // Cargo always recomputes and overwrites NUM_JOBS itself for every
+    // build script invocation (confirmed directly: exporting NUM_JOBS in
+    // the calling shell does not survive), so there is no way to keep
+    // this multi-hour C++ build at a normal parallelism level while
+    // separately constraining Cargo's own Rust-side unit scheduling
+    // (e.g. to test a Cargo job-scheduling race theory) without a knob
+    // that bypasses NUM_JOBS entirely.
+    env::var("OSQUERY_SYS_CMAKE_JOBS")
+        .or_else(|_| env::var("NUM_JOBS"))
+        .unwrap_or_else(|_| {
+            std::thread::available_parallelism()
+                .map(|n| n.get().min(4))
+                .unwrap_or(4)
+                .add(1)
+                .to_string()
+        })
 }
 
 fn run(command: &mut Command, description: &str) {
