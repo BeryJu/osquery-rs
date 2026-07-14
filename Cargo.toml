@@ -9,10 +9,10 @@ members = ["osquery-sys", "osquery"]
 # without it, `cargo publish -p osquery` fails outright. Both crates always
 # share the same version (via workspace.package.version below), so this
 # must be bumped in lockstep with that whenever either is released.
-osquery-sys = { path = "osquery-sys", version = "0.1.0" }
+osquery-sys = { path = "osquery-sys", version = "0.1.1" }
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/BeryJu/osquery-rs"
