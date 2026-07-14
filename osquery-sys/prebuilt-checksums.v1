@@ -16,7 +16,7 @@
 # build with an informational cargo:warning rather than a hard error, since
 # "no prebuilt exists yet for this crate version" isn't a release-process
 # bug, just the initial/pre-release state.
-x86_64-unknown-linux-gnu	a1ac1091b76de31bc42cddd1a7a9a20e8c8460dfea7dac8ec3fef8aa73b24069
-aarch64-unknown-linux-gnu	81d4617dd52065f83c797914ef4425342982c29f1427f0cb1381088a8e36840a
-aarch64-apple-darwin	04e48fa7ff80a2a3a7b2dc61f8481aaef3289c3ed03a2deec6a41ed339af2cac
 x86_64-pc-windows-msvc	74c821655d8cf342a6e409b9831d186fa72c2c8bb35f2ff9b6bdddc6da561ec6
+x86_64-unknown-linux-gnu	ace5f87f053b07140ba0f72dcc8125410f0404c215a3999f176b440f9f370b55
+aarch64-unknown-linux-gnu	348c29063e22052a42556c4e8996971a6fc040cecdade5558dd091c9d59ae2e4
+aarch64-apple-darwin	6d0f52967c5d0fab8980f2dabf6331209e47c0a987666909c179b639e9d3155c
