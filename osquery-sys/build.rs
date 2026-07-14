@@ -604,21 +604,6 @@ fn cargo_target_dir() -> PathBuf {
         .to_path_buf()
 }
 
-/// Sets a single, lightweight git tracing env var on a git (or
-/// git-spawning) child process, so a stalled/slow network fetch produces
-/// some continuous diagnostic output instead of potential total silence.
-/// Deliberately just `GIT_TRACE` (one line per git subcommand dispatched) --
-/// `GIT_CURL_VERBOSE` (full HTTP request/response headers) and
-/// `GIT_TRACE_PERFORMANCE` (per-internal-operation timing) were tried too,
-/// but across ~30 nested submodule fetches during `cmake configure` they
-/// multiplied CI log volume enough to be its own problem (log fetches were
-/// getting truncated well before reaching the actual error). Applied both
-/// to our own explicit clone and to `cmake configure` (whose nested `git
-/// submodule` fetches for boost/thrift/rocksdb/... inherit this env too).
-fn apply_git_diagnostics(cmd: &mut Command) {
-    cmd.env("GIT_TRACE", "1");
-}
-
 /// Clones osquery's pinned tag into `dest` if it isn't already there.
 /// Shallow (`--depth 1`): we only need this exact tag's tree, not history.
 /// Nested third-party submodules (boost, thrift, rocksdb, ...) are NOT
@@ -660,7 +645,6 @@ fn ensure_osquery_source(dest: &Path) -> bool {
         .arg("1")
         .arg(OSQUERY_REPO_URL)
         .arg(dest);
-    apply_git_diagnostics(&mut clone);
     run(&mut clone, "git clone osquery");
     true
 }
@@ -1048,7 +1032,6 @@ fn configure_and_build(src_dir: &Path, build_dir: &Path) {
         // docs) for the OpenSSL formula's build; also must be on PATH.
     }
 
-    apply_git_diagnostics(&mut configure);
     run(&mut configure, "cmake configure");
 
     // The patched file (a vendored Boost header) lives inside a nested
