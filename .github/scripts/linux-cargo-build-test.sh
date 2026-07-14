@@ -89,30 +89,22 @@ trap 'kill "$HEARTBEAT_PID" 2>/dev/null || true' EXIT
 # time, run inside the identical manylinux_2_34_aarch64 container with
 # the identical pinned Rust 1.97.0 toolchain and gcc-toolset-14 linker.
 #
-# The one dimension that small repro cannot replicate is real build
-# parallelism: it has only 2 crates, essentially no concurrent jobs,
-# while this project's actual build compiles 100+ units concurrently.
-# If Cargo's own (Rust-implemented) aggregation of a build script's
-# stdout-parsed directives into its shared build-plan state has a rare
-# thread-safety bug that happens to be masked by x86_64's stronger
-# memory-ordering model but surfaces under aarch64's weaker one, it
-# would need real concurrent load to trigger -- exactly what the repro
-# lacks and this real build has. --jobs 1 forces fully serial
-# compilation to test that directly: if the failure disappears, that's
-# a real, actionable finding (serialize aarch64 CI permanently, and/or
-# report a reproducible upstream Cargo bug) rather than another guess.
-# Scoped to aarch64 only so the already-working x86_64 path (which also
-# runs this same script) stays untouched, fast, and its log stays
-# readable.
+# Ruled out since: real Cargo build parallelism (CARGO_BUILD_JOBS=1 on a
+# real CI run made no difference -- identical failure, same missing
+# plain libraries) and 80,000 lines of non-"cargo:"-prefixed stdout
+# volume before the real directives in a local repro (simulating the
+# real CMake build's own forwarded output -- also no difference).
+#
+# Root cause not identified, but +whole-archive propagation has a 100%
+# success rate everywhere tested (repro and real CI alike) versus 100%
+# failure for plain propagation on this one target -- build.rs's
+# emit_link_items now forces every static lib to +whole-archive on
+# aarch64-unknown-linux-gnu specifically as a documented workaround (see
+# its own comment for the full reasoning and everything ruled out).
+# RUSTFLAGS=--verbose stays on so a full, non-abbreviated link command
+# is available immediately if this still doesn't fully resolve it.
 if [ "$(uname -m)" = "aarch64" ]; then
-  # OSQUERY_SYS_CMAKE_JOBS keeps the (already multi-hour) CMake/C++ build
-  # at a normal parallelism level -- Cargo itself always recomputes and
-  # overwrites NUM_JOBS (which build.rs would otherwise read for CMake's
-  # own -j flag) to match CARGO_BUILD_JOBS for every build script
-  # invocation, confirmed directly by exporting NUM_JOBS locally and
-  # observing Cargo overwrite it -- see build.rs's num_jobs() comment.
-  export OSQUERY_SYS_CMAKE_JOBS=5
-  export CARGO_BUILD_JOBS=1
+  export RUSTFLAGS="--verbose"
 fi
 
 cargo test -p osquery --features integration-tests -vv -- --nocapture 2>&1 | fold -w 2000
