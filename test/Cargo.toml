@@ -1,0 +1,8 @@
+[package]
+name = "osquery-sys-test"
+version = "0.1.3"
+edition = "2024"
+
+[dependencies]
+osquery = { git = "https://github.com/BeryJu/osquery-rs", version = "0.1.3" }
+

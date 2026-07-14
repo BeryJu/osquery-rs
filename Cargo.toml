@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["osquery-sys", "osquery"]
+exclude = ["test"]
 
 [workspace.dependencies]
 # `version` is required here (not just `path`) because `cargo publish`
