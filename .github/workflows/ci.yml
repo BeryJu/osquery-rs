@@ -64,6 +64,38 @@ jobs:
             bash .github/scripts/manylinux-entrypoint.sh \
             bash .github/scripts/linux-cargo-build-test.sh
 
+  linux-arm64:
+    name: Linux (aarch64)
+    # GitHub's own native arm64-hosted Linux runner (GA for both public and
+    # private repos as of 2026-01) -- NOT emulation, a real aarch64 host.
+    # Label is `ubuntu-24.04-arm` (no "64" suffix despite being arm64 --
+    # that's just GitHub's naming).
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Restore osquery source + native build cache
+        uses: actions/cache@v6
+        with:
+          path: target/osquery-sys
+          key: osquery-sys-linux-arm64-${{ hashFiles('osquery-sys/build.rs') }}
+
+      - name: Build + test inside manylinux_2_34 (glibc 2.34 floor)
+        # Not manylinux2014 like the x86_64 job above: the toolchain's
+        # aarch64 clang/LLVM 18.1 and its bundled assembler need glibc
+        # 2.34+. Also release.yml's aarch64 glibc floor, so CI exercises
+        # the same container that ships. See the x86_64 job above for why
+        # this runs via a manual `docker run`.
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:${{ github.workspace }}" \
+            -w "${{ github.workspace }}" \
+            -e OSQUERY_SYS_FORCE_SOURCE_BUILD \
+            quay.io/pypa/manylinux_2_34_aarch64 \
+            bash .github/scripts/manylinux-entrypoint.sh \
+            bash .github/scripts/linux-cargo-build-test.sh
+
   macos:
     name: macOS (aarch64)
     runs-on: macos-14
@@ -87,6 +119,8 @@ jobs:
         run: brew install ccache git git-lfs cmake python clang-format flex bison
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
 
       - name: Restore osquery source + native build cache
         uses: actions/cache@v6
@@ -110,6 +144,18 @@ jobs:
     name: Windows (x86_64)
     runs-on: windows-latest
     timeout-minutes: 240
+    env:
+      # Also set as a real env var, not just via .cargo/config.toml:
+      # actions-rust-lang/setup-rust-toolchain's own automatic `target/`
+      # cache key explicitly hashes the RUSTFLAGS *environment variable*
+      # (confirmed via its own cache-configuration log dump), not
+      # .cargo/config.toml's content -- so a config.toml-only change is
+      # invisible to that cache key, and a prior CI run silently restored
+      # a stale, pre-fix (/MD-compiled) shim.o from cache despite the
+      # config.toml fix being in place (same object-file hash, same
+      # LNK2038 error, on the run right after that fix landed). Setting
+      # the identical flag here as an env var busts that cache key too.
+      RUSTFLAGS: -C target-feature=+crt-static
     steps:
       - name: Enable long paths in git
         # osquery's own Windows build docs note path-length issues are a
@@ -138,6 +184,8 @@ jobs:
       - uses: ilammy/msvc-dev-cmd@v1
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
 
       - name: Restore osquery source + native build cache
         uses: actions/cache@v6

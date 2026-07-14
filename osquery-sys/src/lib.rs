@@ -19,6 +19,26 @@ pub const OSQUERY_EMBED_QUERY_FAILED: u32 = 3;
 pub const OSQUERY_EMBED_EXCEPTION: u32 = 4;
 pub const OSQUERY_EMBED_UNKNOWN: u32 = 5;
 
+/// Severity levels passed to an `osquery_embed_log_callback`, mirroring
+/// osquery's own `StatusLogSeverity` (see
+/// `osquery/core/plugins/logger.h`).
+pub const OSQUERY_EMBED_LOG_INFO: i32 = 0;
+pub const OSQUERY_EMBED_LOG_WARNING: i32 = 1;
+pub const OSQUERY_EMBED_LOG_ERROR: i32 = 2;
+pub const OSQUERY_EMBED_LOG_FATAL: i32 = 3;
+
+/// See `shim.h`'s `osquery_embed_log_callback`. May be invoked from any
+/// internal osquery thread, not just the one that called
+/// `osquery_embed_init`/`osquery_embed_query`.
+pub type osquery_embed_log_callback = extern "C" fn(
+    severity: i32,
+    filename: *const c_char,
+    filename_len: usize,
+    line: i32,
+    message: *const c_char,
+    message_len: usize,
+);
+
 unsafe extern "C" {
     pub fn osquery_embed_init(argc: c_int, argv: *mut *mut c_char) -> i32;
     pub fn osquery_embed_shutdown() -> i32;
@@ -29,4 +49,5 @@ unsafe extern "C" {
         out_len: *mut usize,
     ) -> i32;
     pub fn osquery_embed_free_string(ptr: *mut c_char);
+    pub fn osquery_embed_set_log_callback(callback: Option<osquery_embed_log_callback>);
 }

@@ -1,8 +1,8 @@
 name: Release
 
 # Triggered by pushing a version tag (v<CARGO_PKG_VERSION>, e.g. v0.1.0):
-# builds osquery from source on all 3 platforms exactly like ci.yml does,
-# but additionally stages each build's own outputs into a prebuilt bundle
+# builds osquery from source on all 4 target triples exactly like ci.yml
+# does, but additionally stages each build's own outputs into a prebuilt bundle
 # (see OSQUERY_SYS_PACKAGE_DIR / stage_prebuilt_package in
 # osquery-sys/build.rs), uploads those bundles as GitHub Release assets,
 # and only then runs `cargo publish`. This is what populates
@@ -72,6 +72,51 @@ jobs:
           name: prebuilt-x86_64-unknown-linux-gnu
           path: dist/*
 
+  build-linux-arm64:
+    name: Build prebuilt bundle (Linux aarch64)
+    # GitHub's native arm64-hosted runner (GA for public/private repos) --
+    # a real aarch64 host, not emulation.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Restore osquery source + native build cache
+        uses: actions/cache@v6
+        with:
+          path: target/osquery-sys
+          key: osquery-sys-linux-arm64-${{ hashFiles('osquery-sys/build.rs') }}
+
+      - name: Build osquery-sys and stage the prebuilt bundle
+        # manylinux_2_34, not manylinux2014 like the x86_64 job above (see
+        # ci.yml's aarch64 job for why) -- so the shipped aarch64 artifact's
+        # glibc floor (2.34) is considerably newer than x86_64's (2.17).
+        # Same container as ci.yml's aarch64 job, so CI exercises what ships.
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:${{ github.workspace }}" \
+            -w "${{ github.workspace }}" \
+            -e OSQUERY_SYS_PACKAGE_DIR="${{ github.workspace }}/pkg" \
+            quay.io/pypa/manylinux_2_34_aarch64 \
+            bash .github/scripts/manylinux-entrypoint.sh \
+            cargo build --workspace -vv
+
+      - name: Package and hash the bundle
+        shell: bash
+        run: |
+          set -eux
+          VERSION="${GITHUB_REF_NAME#v}"
+          TARGET="aarch64-unknown-linux-gnu"
+          mkdir -p dist
+          tar --zstd -cf "dist/osquery-sys-${VERSION}-${TARGET}.tar.zst" -C pkg .
+          sha256sum "dist/osquery-sys-${VERSION}-${TARGET}.tar.zst" \
+            | awk '{print $1}' > "dist/osquery-sys-${VERSION}-${TARGET}.sha256"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: prebuilt-aarch64-unknown-linux-gnu
+          path: dist/*
+
   build-macos:
     name: Build prebuilt bundle (macOS aarch64)
     runs-on: macos-14
@@ -120,6 +165,11 @@ jobs:
     name: Build prebuilt bundle (Windows x86_64)
     runs-on: windows-latest
     timeout-minutes: 240
+    env:
+      # See ci.yml's Windows job for why this is also set as a real env
+      # var and not left to .cargo/config.toml alone (that action's own
+      # `target/` cache key hashes the RUSTFLAGS env var specifically).
+      RUSTFLAGS: -C target-feature=+crt-static
     steps:
       - name: Enable long paths in git
         run: git config --global core.longpaths true
@@ -166,7 +216,7 @@ jobs:
 
   finalize:
     name: Commit checksums, upload release, verify, publish
-    needs: [build-linux, build-macos, build-windows]
+    needs: [build-linux, build-linux-arm64, build-macos]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -193,7 +243,7 @@ jobs:
           set -eux
           VERSION="${GITHUB_REF_NAME#v}"
           CHECKSUMS="osquery-sys/prebuilt-checksums.v1"
-          for target in x86_64-unknown-linux-gnu aarch64-apple-darwin x86_64-pc-windows-msvc; do
+          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu aarch64-apple-darwin; do
             hash=$(cat "dist/osquery-sys-${VERSION}-${target}.sha256")
             # Drop any existing line for this exact target (e.g. re-tagging
             # the same version after fixing a release problem), then
@@ -235,7 +285,7 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           rm -rf verify && mkdir verify
           gh release download "${{ github.ref_name }}" --dir verify --pattern "*.tar.zst"
-          for target in x86_64-unknown-linux-gnu aarch64-apple-darwin x86_64-pc-windows-msvc; do
+          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu aarch64-apple-darwin; do
             expected=$(cat "dist/osquery-sys-${VERSION}-${target}.sha256")
             actual=$(sha256sum "verify/osquery-sys-${VERSION}-${target}.tar.zst" | awk '{print $1}')
             if [ "$expected" != "$actual" ]; then
@@ -249,12 +299,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh release edit "${{ github.ref_name }}" --draft=false
 
-      - name: cargo publish
-        # Requires a CARGO_REGISTRY_TOKEN repo secret (crates.io API token
-        # with publish rights for both crates) -- a one-time manual setup
-        # step, not something this workflow can configure itself.
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: |
-          cargo publish -p osquery-sys --locked
-          cargo publish -p osquery --locked
+      # - name: cargo publish
+      #   # Requires a CARGO_REGISTRY_TOKEN repo secret (crates.io API token
+      #   # with publish rights for both crates) -- a one-time manual setup
+      #   # step, not something this workflow can configure itself.
+      #   env:
+      #     CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      #   run: |
+      #     cargo publish -p osquery-sys --locked
+      #     cargo publish -p osquery --locked

@@ -3,13 +3,10 @@
 # the manylinux2014 container. Split out from ci.yml itself only so the
 # `docker run` invocation there stays a single readable line.
 set -eux
+set -o pipefail
 
-# Diagnostic: a prior Linux run went completely silent for 60+ minutes with
-# no way to tell whether the runner itself froze or just the compiler
-# process did. Comparing whether these heartbeat lines keep appearing
-# (system alive, something else hung) against `free -h`'s own numbers
-# (memory exhausted at the time it stopped) gives a real answer instead of
-# another guess if it happens again.
+# Diagnostic: distinguishes a hung runner from a merely slow compiler by
+# comparing heartbeat continuity against `free -h`'s memory numbers.
 ( while true; do
     sleep 60
     echo "=== heartbeat $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
@@ -20,5 +17,8 @@ set -eux
 HEARTBEAT_PID=$!
 trap 'kill "$HEARTBEAT_PID" 2>/dev/null || true' EXIT
 
-cargo build --workspace -vv
-cargo test -p osquery --features integration-tests -vv -- --nocapture
+# `-vv` echoes every rustc invocation, including all -L/-l flags -- tens of
+# KB per line for this project, past what GitHub Actions' log storage keeps
+# intact. `fold` keeps lines short; `set -o pipefail` above keeps cargo's
+# own exit code (not fold's) governing `set -e`.
+cargo test -p osquery --features integration-tests -vv -- --nocapture 2>&1 | fold -w 2000

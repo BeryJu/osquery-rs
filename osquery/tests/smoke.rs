@@ -1,19 +1,26 @@
-//! Stage 1 acceptance test: requires the full native osquery build to have
-//! succeeded (see osquery-sys/build.rs), so it's gated behind a feature
-//! rather than run by a plain `cargo test`.
 #![cfg(feature = "integration-tests")]
 
 use std::path::Path;
 
 use osquery::OsqueryInstance;
 
-// A single test, not two: OsqueryInstance is a process-wide singleton (see
-// osquery/src/instance.rs), and `cargo test` runs every #[test] fn in one
-// process (on separate threads) by default -- two independent tests each
-// calling `OsqueryInstance::start()` would race for that one slot instead
-// of exercising it deterministically.
 #[test]
-fn select_1_end_to_end_with_no_socket_then_second_start_is_refused() {
+fn select_users_no_err() {
+    let instance = OsqueryInstance::start().expect("failed to start embedded osquery");
+
+    assert!(instance.query("SELECT * FROM users").is_ok());
+}
+
+#[test]
+fn singleton() {
+    let _instance = OsqueryInstance::start().expect("failed to start embedded osquery");
+
+    let second = OsqueryInstance::start();
+    assert!(second.is_err(), "a second instance should be refused");
+}
+
+#[test]
+fn select_1_end_to_end_with_no_socket() {
     // osquery's shell-mode socket path defaults to `<home>/shell.em[.<rand>]`
     // (see osquery::osqueryHomeDirectory()/initShellSocket() upstream).
     // Snapshot any pre-existing *.em files so we only flag ones this test
@@ -37,9 +44,6 @@ fn select_1_end_to_end_with_no_socket_then_second_start_is_refused() {
         new_sockets.is_empty(),
         "expected zero new extension socket files, found: {new_sockets:?}"
     );
-
-    let second = OsqueryInstance::start();
-    assert!(second.is_err(), "a second instance should be refused");
 }
 
 fn list_em_files(dir: &Path) -> std::collections::HashSet<String> {

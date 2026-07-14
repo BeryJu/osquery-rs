@@ -59,12 +59,13 @@ const OSQUERY_TAG: &str = "5.23.1";
 const OSQUERY_REPO_URL: &str = "https://github.com/osquery/osquery.git";
 
 /// Target triples this crate ships a prebuilt bundle for -- exactly the
-/// three platforms `.github/workflows/release.yml` builds. Anything else
-/// (e.g. `aarch64-unknown-linux-gnu`, `x86_64-apple-darwin`) automatically
-/// routes to the from-source path in `main`, extended by adding a new CI
-/// job and appending its target triple here, nothing else.
+/// four target triples `.github/workflows/release.yml` builds. Anything
+/// else (e.g. `x86_64-apple-darwin`, `aarch64-unknown-linux-musl`)
+/// automatically routes to the from-source path in `main`, extended by
+/// adding a new CI job and appending its target triple here, nothing else.
 const PREBUILT_TARGETS: &[&str] = &[
     "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
     "aarch64-apple-darwin",
     "x86_64-pc-windows-msvc",
 ];
@@ -191,6 +192,8 @@ fn main() {
             sysroot.as_deref(),
             &defines,
             &includes,
+            &src_dir,
+            &build_dir,
         );
     }
 
@@ -201,6 +204,11 @@ fn main() {
         &compile_compat_stubs(&shim_dir, &cxx_compiler),
         false,
     ));
+    // Applied after compat_stubs is pushed (not before, as an earlier
+    // version of this workaround did) -- see force_whole_archive_workaround's
+    // own doc comment for why compat_stubs specifically needs
+    // .cargo_metadata(false) on its cc::Build for this to be safe.
+    force_whole_archive_workaround(&mut items);
 
     emit_link_items(&items);
 
@@ -274,6 +282,12 @@ fn try_prebuilt(cache_root: &Path, src_dir: &Path, shim_dir: &Path) -> PrebuiltA
         .unwrap_or_else(|e| panic!("failed to read cached {}: {e}", manifest_path.display()));
     let manifest = parse_manifest(&manifest_text, &bundle_dir);
 
+    // See append_linux_default_linker_items's comment for why this must be
+    // printed before anything that -L's the toolchain's own sysroot.
+    if env::var("TARGET").as_deref() == Ok("aarch64-unknown-linux-gnu") {
+        println!("cargo:rustc-link-search=native=/usr/lib64");
+    }
+
     let mut items = manifest.items;
     // Recompiled fresh locally every time, prebuilt path or not -- see
     // stage_prebuilt_package's own doc comment for why this (and the rest
@@ -282,6 +296,7 @@ fn try_prebuilt(cache_root: &Path, src_dir: &Path, shim_dir: &Path) -> PrebuiltA
         &compile_compat_stubs(shim_dir, &manifest.cxx_compiler),
         false,
     ));
+    force_whole_archive_workaround(&mut items);
     emit_link_items(&items);
 
     compile_shim(
@@ -429,7 +444,7 @@ fn parse_manifest(contents: &str, bundle_dir: &Path) -> PrebuiltManifest {
             cxx_includes = rest
                 .split('\t')
                 .filter(|s| !s.is_empty())
-                .map(String::from)
+                .map(|s| rejoin_bundle_include_token(s, bundle_dir))
                 .collect();
         } else if line.starts_with('#') || line.trim().is_empty() {
             continue;
@@ -491,9 +506,56 @@ fn stage_prebuilt_package(
     sysroot: Option<&Path>,
     defines: &[String],
     includes: &[String],
+    src_dir: &Path,
+    build_dir: &Path,
 ) {
     let lib_dir = package_dir.join("lib");
     fs::create_dir_all(&lib_dir).unwrap_or_else(|e| panic!("failed to create {}: {e}", lib_dir.display()));
+    let bundle_include_dir = package_dir.join("include");
+
+    // `includes` alternates "-Ipath" single tokens with "-isystem"/"path"
+    // token *pairs* (confirmed directly from real manifest.v1 content) --
+    // walk with an explicit cursor rather than `.map()` so a pair's two
+    // tokens are classified/dropped together. Every path gets bundled
+    // (see bundle_include_path) rather than staying a raw absolute path
+    // from this machine, which a consumer could never resolve.
+    let mut copied_include_dirs: HashSet<PathBuf> = HashSet::new();
+    let mut rewritten_includes: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < includes.len() {
+        let tok = includes[i].as_str();
+        if tok == "-isystem" {
+            let path_str = includes
+                .get(i + 1)
+                .unwrap_or_else(|| panic!("dangling -isystem with no following path in cxx_includes"));
+            if let Some(rewritten) = bundle_include_path(
+                path_str,
+                src_dir,
+                build_dir,
+                &bundle_include_dir,
+                &mut copied_include_dirs,
+            ) {
+                rewritten_includes.push("-isystem".to_string());
+                rewritten_includes.push(rewritten);
+            }
+            i += 2;
+        } else if let Some(path_str) = tok.strip_prefix("-I") {
+            if let Some(rewritten) = bundle_include_path(
+                path_str,
+                src_dir,
+                build_dir,
+                &bundle_include_dir,
+                &mut copied_include_dirs,
+            ) {
+                rewritten_includes.push(format!("-I{rewritten}"));
+            }
+            i += 1;
+        } else {
+            // Unrecognized token shape -- keep as-is defensively.
+            rewritten_includes.push(tok.to_string());
+            i += 1;
+        }
+    }
 
     let mut manifest = String::new();
     manifest.push_str("# osquery-sys prebuilt bundle manifest, schema v1\n");
@@ -503,8 +565,11 @@ fn stage_prebuilt_package(
         "# sysroot={}\n",
         sysroot.map(|p| p.display().to_string()).unwrap_or_default()
     ));
+    // cxx_defines are all `-DNAME[=value]` flags (audited directly against
+    // real manifest content) -- never filesystem paths, so unlike
+    // cxx_includes below, these need no rewriting.
     manifest.push_str(&format!("# cxx_defines={}\n", defines.join("\t")));
-    manifest.push_str(&format!("# cxx_includes={}\n", includes.join("\t")));
+    manifest.push_str(&format!("# cxx_includes={}\n", rewritten_includes.join("\t")));
 
     let mut used_names: HashSet<String> = HashSet::new();
     for item in items {
@@ -590,21 +655,6 @@ fn cargo_target_dir() -> PathBuf {
         .to_path_buf()
 }
 
-/// Sets a single, lightweight git tracing env var on a git (or
-/// git-spawning) child process, so a stalled/slow network fetch produces
-/// some continuous diagnostic output instead of potential total silence.
-/// Deliberately just `GIT_TRACE` (one line per git subcommand dispatched) --
-/// `GIT_CURL_VERBOSE` (full HTTP request/response headers) and
-/// `GIT_TRACE_PERFORMANCE` (per-internal-operation timing) were tried too,
-/// but across ~30 nested submodule fetches during `cmake configure` they
-/// multiplied CI log volume enough to be its own problem (log fetches were
-/// getting truncated well before reaching the actual error). Applied both
-/// to our own explicit clone and to `cmake configure` (whose nested `git
-/// submodule` fetches for boost/thrift/rocksdb/... inherit this env too).
-fn apply_git_diagnostics(cmd: &mut Command) {
-    cmd.env("GIT_TRACE", "1");
-}
-
 /// Clones osquery's pinned tag into `dest` if it isn't already there.
 /// Shallow (`--depth 1`): we only need this exact tag's tree, not history.
 /// Nested third-party submodules (boost, thrift, rocksdb, ...) are NOT
@@ -646,7 +696,6 @@ fn ensure_osquery_source(dest: &Path) -> bool {
         .arg("1")
         .arg(OSQUERY_REPO_URL)
         .arg(dest);
-    apply_git_diagnostics(&mut clone);
     run(&mut clone, "git clone osquery");
     true
 }
@@ -656,6 +705,7 @@ fn ensure_osquery_source(dest: &Path) -> bool {
 /// build.rs never double-patches.
 fn apply_local_patches(src_dir: &Path) {
     patch_boost_mpl_enum_constexpr_conversion(src_dir);
+    patch_boost_numeric_conversion_mixture_enums(src_dir);
 }
 
 /// Boost.MPL's integral_wrapper.hpp computes value+1/value-1 for every
@@ -708,6 +758,61 @@ fn patch_boost_mpl_enum_constexpr_conversion(src_dir: &Path) {
         .replacen(close_marker, close_replacement, 1);
     fs::write(&path, patched)
         .unwrap_or_else(|e| panic!("failed to write patched {}: {e}", path.display()));
+}
+
+/// Boost.MPL's `integral_c<EnumType, N>::prior` unconditionally computes
+/// `static_cast<EnumType>(N - 1)`, including at `N == 0`. For an unscoped
+/// enum without a fixed underlying type, casting an out-of-range int to it
+/// in a constant expression is ill-formed per the standard; some Clang
+/// versions only warn (`-Wenum-constexpr-conversion`, suppressible), but at
+/// least one (a bleeding-edge Xcode beta, Apple clang 21) rejects it
+/// unconditionally and doesn't even recognize that diagnostic's name, so no
+/// amount of `-Wno-...`/pragma suppression helps there (this is the same
+/// underlying issue `patch_boost_mpl_enum_constexpr_conversion` targets, but
+/// that patch is a no-op on toolchains where the diagnostic can't be named).
+/// Giving the specific enums this path instantiates a fixed underlying type
+/// sidesteps the rule entirely -- with a fixed underlying type, the enum's
+/// valid range is the underlying type's full range, so the cast is always
+/// well-formed, on every Clang. These three are Boost.NumericConversion's
+/// complete family of "mixture" tag enums (all in the same directory, same
+/// author, same shape); patch all of them together rather than one at a
+/// time as each is separately discovered via a different call site
+/// (`udt_builtin_mixture_enum`/`int_float_mixture_enum` reachable from
+/// shim.cpp directly, `sign_mixture_enum` only reachable via osqueryd's own
+/// full build, through Thrift's use of `boost::numeric_cast`).
+fn patch_boost_numeric_conversion_mixture_enums(src_dir: &Path) {
+    let base = src_dir.join(
+        "libraries/cmake/source/boost/src/libs/numeric/conversion/include/boost/numeric/conversion",
+    );
+    for (file, enum_name) in [
+        ("udt_builtin_mixture_enum.hpp", "udt_builtin_mixture_enum"),
+        ("int_float_mixture_enum.hpp", "int_float_mixture_enum"),
+        ("sign_mixture_enum.hpp", "sign_mixture_enum"),
+    ] {
+        let path = base.join(file);
+        let contents = fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
+        let contents = contents.replace("\r\n", "\n");
+
+        let fixed_marker = format!("enum {enum_name} : int");
+        if contents.contains(&fixed_marker) {
+            continue; // already patched
+        }
+
+        let marker = format!("enum {enum_name}\n  {{");
+        let replacement = format!("enum {enum_name} : int\n  {{");
+        if !contents.contains(&marker) {
+            panic!(
+                "expected anchor text not found in {} -- osquery's vendored Boost \
+                 version may have changed; update patch_boost_numeric_conversion_mixture_enums",
+                path.display()
+            );
+        }
+
+        let patched = contents.replacen(&marker, &replacement, 1);
+        fs::write(&path, patched)
+            .unwrap_or_else(|e| panic!("failed to write patched {}: {e}", path.display()));
+    }
 }
 
 fn osqueryd_name() -> &'static str {
@@ -1034,7 +1139,6 @@ fn configure_and_build(src_dir: &Path, build_dir: &Path) {
         // docs) for the OpenSSL formula's build; also must be on PATH.
     }
 
-    apply_git_diagnostics(&mut configure);
     run(&mut configure, "cmake configure");
 
     // The patched file (a vendored Boost header) lives inside a nested
@@ -1055,19 +1159,20 @@ fn configure_and_build(src_dir: &Path, build_dir: &Path) {
 }
 
 fn num_jobs() -> String {
-    // osquery's own docs warn that Clang can crash/OOM compiling
-    // third-party dependencies (boost, thrift, rocksdb, ...) with under
-    // ~8GB of memory; a full-parallelism build (one heavy clang++ process
-    // per core) can exceed that even on machines with plenty of cores but
-    // constrained memory (e.g. a capped Docker Desktop VM). Default to a
-    // conservative cap and let callers with more memory raise it.
-    env::var("NUM_JOBS").unwrap_or_else(|_| {
-        std::thread::available_parallelism()
-            .map(|n| n.get().min(4))
-            .unwrap_or(4)
-            .add(1)
-            .to_string()
-    })
+    // Clang can OOM compiling third-party deps (boost, thrift, rocksdb) with
+    // under ~8GB per core; cap parallelism conservatively by default and let
+    // callers raise it. OSQUERY_SYS_CMAKE_JOBS overrides NUM_JOBS just for
+    // this build, since Cargo always overwrites NUM_JOBS to match its own
+    // `--jobs`/CARGO_BUILD_JOBS for every build script invocation.
+    env::var("OSQUERY_SYS_CMAKE_JOBS")
+        .or_else(|_| env::var("NUM_JOBS"))
+        .unwrap_or_else(|_| {
+            std::thread::available_parallelism()
+                .map(|n| n.get().min(4))
+                .unwrap_or(4)
+                .add(1)
+                .to_string()
+        })
 }
 
 fn run(command: &mut Command, description: &str) {
@@ -1167,6 +1272,26 @@ fn emit_link_items(items: &[LinkItem]) {
     }
 }
 
+/// WORKAROUND, not a root-cause fix: on aarch64-unknown-linux-gnu, plain
+/// (non-whole-archive) `cargo:rustc-link-lib` directives never reach the
+/// downstream `smoke`/`osquery` test binary's real link -- an unidentified
+/// Cargo/rustc propagation gap. `+whole-archive` propagates reliably and is
+/// a strictly stronger request (superset of what plain would link), so
+/// forcing every static lib to it here sidesteps the bug.
+///
+/// Must run after compat_stubs is pushed onto `items`: see
+/// `compile_compat_stubs`'s comment for why it needs a single emission path.
+fn force_whole_archive_workaround(items: &mut [LinkItem]) {
+    if env::var("TARGET").as_deref() != Ok("aarch64-unknown-linux-gnu") {
+        return;
+    }
+    for item in items {
+        if let LinkItem::StaticLib { whole_archive, .. } = item {
+            *whole_archive = true;
+        }
+    }
+}
+
 fn link_item_for_archive(path: &Path, whole_archive: bool) -> LinkItem {
     let dir = path
         .parent()
@@ -1228,8 +1353,16 @@ fn collect_link_items(link_line: &str, osqueryd_path: &Path, link_cwd: &Path) ->
     let mut items = Vec::new();
     let mut i = if tokens.is_empty() { 0 } else { 1 }; // token 0 is the driver itself
     let mut whole_archive = false;
+    // Apple ld64's `-Wl,-force_load <path>` is a one-shot pair (unlike the
+    // GNU `-Wl,--whole-archive`/`--no-whole-archive` bracket idiom, which
+    // toggles a *run* of following archives): it force-loads exactly the
+    // one archive named by the very next token. Captured-and-cleared at
+    // the top of each iteration so it can only ever apply to that single
+    // next token, regardless of which branch below ends up handling it.
+    let mut force_load_next = false;
 
     while i < tokens.len() {
+        let force_load_this = std::mem::take(&mut force_load_next);
         let tok = tokens[i].as_str();
 
         if cfg!(windows) {
@@ -1302,13 +1435,38 @@ fn collect_link_items(link_line: &str, osqueryd_path: &Path, link_cwd: &Path) ->
                 i += 1;
                 continue;
             }
+            // Two-token form, e.g. `-Wl,-force_load /abs/path/libFoo.a`
+            // (confirmed via the real osqueryd link.txt on macOS -- this
+            // is how CMake force-loads libraries whose only job is
+            // running static-initializer side effects, like table/plugin
+            // registration, since nothing else references their object
+            // files by symbol name).
+            if tok == "-Wl,-force_load" {
+                force_load_next = true;
+                i += 1;
+                continue;
+            }
+            // Defensive: a comma-joined single-token form
+            // (`-Wl,-force_load,/abs/path.a`), in case a different
+            // CMake/Xcode generator version ever emits it that way
+            // instead. Not observed in this repo's own link.txt, but
+            // cheap to handle alongside the two-token form above.
+            if let Some(rest) = tok.strip_prefix("-Wl,-force_load,") {
+                let resolved = resolve_token_path(rest, link_cwd);
+                items.push(link_item_for_archive(Path::new(&resolved), true));
+                i += 1;
+                continue;
+            }
             if tok.ends_with(".a") && is_osquery_main_archive(tok) {
                 i += 1;
                 continue;
             }
             if tok.ends_with(".a") {
                 let resolved = resolve_token_path(tok, link_cwd);
-                items.push(link_item_for_archive(Path::new(&resolved), whole_archive));
+                items.push(link_item_for_archive(
+                    Path::new(&resolved),
+                    whole_archive || force_load_this,
+                ));
                 i += 1;
                 continue;
             }
@@ -1560,28 +1718,51 @@ fn resolve_token_path(tok: &str, link_cwd: &Path) -> String {
 fn append_linux_default_linker_items(items: &mut Vec<LinkItem>, sysroot: Option<&Path>) {
     let sysroot = sysroot.expect("OSQUERY_TOOLCHAIN_SYSROOT must be known to adapt link flags");
 
+    // The toolchain's own sysroot bundles glibc-2.27-era compat shims
+    // (libdl.so, librt.so, ...) in the same usr/lib dir libc++.a needs
+    // `-L`'d below. GNU ld resolves `-lNAME` against whichever `-L`
+    // directory lists it first, so print the host's own lib dir here,
+    // before the toolchain's, or `-ldl` resolves to the toolchain's
+    // ABI-mismatched copy instead (undefined @GLIBC_PRIVATE references).
+    if env::var("TARGET").as_deref() == Ok("aarch64-unknown-linux-gnu") {
+        println!("cargo:rustc-link-search=native=/usr/lib64");
+    }
+
     move_dylib_to_end(items, "c");
     move_dylib_to_end(items, "resolv");
 
-    items.push(link_item_for_archive(
-        &sysroot.join("usr/lib/libc++.a"),
-        false,
-    ));
-    items.push(link_item_for_archive(
-        &sysroot.join("usr/lib/libc++abi.a"),
-        false,
-    ));
+    let libcxx = sysroot.join("usr/lib/libc++.a");
+    let libcxxabi = sysroot.join("usr/lib/libc++abi.a");
 
-    // Several osquery/third-party objects (OpenSSL's threads_pthread.c,
-    // librdkafka, boost, libc++ itself, ...) were compiled by the
-    // toolchain's clang targeting aarch64/x86_64 "outline atomics" -- calls
-    // to helper functions like `__aarch64_ldadd4_acq_rel`/`__cas4_rel` that
-    // dispatch to either LL/SC or LSE instructions at runtime based on
-    // detected CPU support. These aren't GNU libatomic symbols (wrong
-    // naming convention entirely); they're LLVM compiler-rt builtins,
-    // which clang normally links in automatically but GCC's driver has no
-    // knowledge of. Reference the toolchain's own compiler-rt archive by
-    // path, again at the very end for archive-ordering reasons.
+    // libc++.a and libc++abi.a both bundle a full copy of LLVM's libunwind,
+    // normally invisible under selective linking but a "multiple
+    // definition" error once force_whole_archive_workaround whole-archives
+    // both on aarch64. Both copies are identical upstream source, so
+    // stripping them from libc++.a (leaving libc++abi.a's) is safe.
+    const LIBUNWIND_OBJECTS_DUPLICATED_IN_LIBCXX: &[&str] = &[
+        "libunwind.cpp.o",
+        "Unwind-EHABI.cpp.o",
+        "UnwindLevel1.c.o",
+        "UnwindLevel1-gcc-ext.c.o",
+        "UnwindRegistersRestore.S.o",
+        "UnwindRegistersSave.S.o",
+        "Unwind-seh.cpp.o",
+        "Unwind-sjlj.c.o",
+        "Unwind-wasm.c.o",
+    ];
+    if env::var("TARGET").as_deref() == Ok("aarch64-unknown-linux-gnu") {
+        for member in LIBUNWIND_OBJECTS_DUPLICATED_IN_LIBCXX {
+            strip_archive_member_if_present(&libcxx, member);
+        }
+    }
+
+    items.push(link_item_for_archive(&libcxx, false));
+    items.push(link_item_for_archive(&libcxxabi, false));
+
+    // Several objects reference "outline atomics" helpers
+    // (`__aarch64_ldadd4_acq_rel` etc.) -- LLVM compiler-rt builtins that
+    // clang links in automatically but GCC's driver doesn't know about.
+    // Reference the toolchain's own compiler-rt archive directly.
     let builtins = find_file_named(sysroot, "libclang_rt.builtins.a").unwrap_or_else(|| {
         panic!(
             "could not find libclang_rt.builtins.a under {}",
@@ -1589,6 +1770,47 @@ fn append_linux_default_linker_items(items: &mut Vec<LinkItem>, sysroot: Option<
         )
     });
     items.push(link_item_for_archive(&builtins, false));
+}
+
+/// Deletes `member` from the archive at `archive_path` via `ar d`, checking
+/// with `ar t` first since `ar d` exits non-zero for an absent member.
+fn strip_archive_member_if_present(archive_path: &Path, member: &str) {
+    let listing = Command::new("ar")
+        .arg("t")
+        .arg(archive_path)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn ar t on {}: {e}", archive_path.display()));
+    if !listing.status.success() {
+        panic!(
+            "ar t on {} failed: {}",
+            archive_path.display(),
+            listing.status
+        );
+    }
+    let present = String::from_utf8_lossy(&listing.stdout)
+        .lines()
+        .any(|line| line == member);
+    if !present {
+        return;
+    }
+
+    let status = Command::new("ar")
+        .arg("d")
+        .arg(archive_path)
+        .arg(member)
+        .status()
+        .unwrap_or_else(|e| {
+            panic!(
+                "failed to spawn ar d to strip {member} from {}: {e}",
+                archive_path.display()
+            )
+        });
+    if !status.success() {
+        panic!(
+            "ar d failed to strip {member} from {}: {status}",
+            archive_path.display()
+        );
+    }
 }
 
 /// Removes the first `Dylib(name)` item found (wherever it currently is)
@@ -1652,20 +1874,47 @@ fn compile_shim(
         }
     }
 
+    if cfg!(target_os = "macos") {
+        // shim.cpp transitively includes boost/mpl (via osquery/utils/expected/
+        // expected.h -> boost::variant) the same way osquery_core itself does --
+        // osquery's own libraries/cmake/source/boost/CMakeLists.txt already
+        // works around this exact issue ("silence enum constexpr conversion for
+        // MPL on Xcode 26") via a `target_compile_options(thirdparty_boost_mpl
+        // INTERFACE -Wno-enum-constexpr-conversion)`, an INTERFACE flag that
+        // only propagates to CMake targets linking against thirdparty_boost_mpl
+        // -- osquery_core's own flags.make (what `defines`/`includes` above are
+        // harvested from) only ever captures `-D`/`-I`/`-isystem` tokens, so
+        // this `-W...` flag never reaches shim.cpp's own compile even when
+        // present there. Boost.MPL/NumericConversion's `integral_c::prior`
+        // computes `value - 1` as an always-instantiated (never actually used)
+        // intermediate type at the enum's first value, producing an
+        // out-of-range enum cast; newer Clang (this diagnostic's name dates it
+        // to roughly Xcode 15+) treats that as ill-formed in a constant
+        // expression. Mirror osquery's own fix directly here rather than
+        // generalizing flag extraction to capture arbitrary `-W...` tokens
+        // from flags.make, which risks pulling in other, unrelated flags too.
+        build.flag("-Wno-enum-constexpr-conversion");
+    }
+
     build.compile("osquery_embed_shim");
 }
 
 /// Compiles compat_stubs.cpp into its own tiny static archive, separate
 /// from libosquery_embed_shim.a (see that file's doc comment for why),
-/// returning the resulting archive's path so it can be appended to the end
-/// of the link item list explicitly rather than left to Cargo's own (early)
-/// placement.
+/// returning its path so the caller can append it to the link item list
+/// explicitly rather than leave it to Cargo's own (early) placement.
+///
+/// `.cargo_metadata(false)` suppresses `cc::Build`'s own automatic (always
+/// plain) link-lib emission, so this archive has exactly one emission path
+/// (the caller's explicit one) and can safely be forced to `+whole-archive`
+/// -- two emissions with conflicting modifiers is a rustc hard error.
 fn compile_compat_stubs(shim_dir: &Path, cxx_compiler: &Path) -> PathBuf {
     let mut build = cc::Build::new();
     build
         .cpp(true)
         .file(shim_dir.join("compat_stubs.cpp"))
-        .std("c++17");
+        .std("c++17")
+        .cargo_metadata(false);
     if !cfg!(windows) {
         // On non-Windows we already resolved the exact compiler CMake used
         // (matters for ABI consistency, see compile_shim); on Windows,
@@ -1796,5 +2045,103 @@ fn find_file_named(root: &Path, name: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Recursively copies every file under `src` into `dst`, creating
+/// directories as needed. Used by `bundle_include_path` to stage a
+/// still-needed include directory into a prebuilt package.
+fn copy_dir_all(src: &Path, dst: &Path) {
+    fs::create_dir_all(dst).unwrap_or_else(|e| panic!("failed to create {}: {e}", dst.display()));
+    let entries =
+        fs::read_dir(src).unwrap_or_else(|e| panic!("failed to read dir {}: {e}", src.display()));
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let dest_path = dst.join(entry.file_name());
+        if path.is_dir() {
+            copy_dir_all(&path, &dest_path);
+        } else {
+            fs::copy(&path, &dest_path).unwrap_or_else(|e| {
+                panic!("failed to copy {} to {}: {e}", path.display(), dest_path.display())
+            });
+        }
+    }
+}
+
+/// Classifies a `cxx_includes` path token (already stripped of any leading
+/// `-I`/`-isystem`) against `build_dir`/`src_dir` and either bundles it into
+/// `package_dir/include/...` (returning the bundle-relative `include/...`
+/// replacement, copying it at most once per unique source directory via
+/// `copied`) or drops it entirely (returning `None`).
+///
+/// Dropped: CMake's own `ns_*`-prefixed virtual-namespace directories
+/// (`cmake/utilities.cmake`'s include-namespace helper -- symlink farms
+/// that just re-expose `src_dir`'s own real headers under a per-target
+/// path, for CMake's own build organization) and `installed_formulas`
+/// (osquery's own CMake-built OpenSSL headers). Both are build-tree-only
+/// and confirmed, via a real compile of shim.cpp/compat_stubs.cpp with
+/// neither present, to be unneeded: `compile_shim`'s own `.include(src_dir)`
+/// call already covers everything the `ns_*` dirs would have symlinked
+/// back to, and neither file includes anything from OpenSSL directly.
+///
+/// Everything else gets bundled, whether it points into the CMake build
+/// tree (e.g. glog's own `log_severity.h`, placed by a real
+/// `configure_file(... COPYONLY)` at CMake configure time -- genuinely
+/// can't be reconstructed without running CMake) or the plain git-cloned
+/// source tree (third-party headers living in a git submodule --
+/// `ensure_osquery_source`'s lightweight clone never runs `git submodule
+/// update`, so a consumer's own local checkout won't have this content
+/// either). Bundling is the only option that's independent of both.
+fn bundle_include_path(
+    path_str: &str,
+    src_dir: &Path,
+    build_dir: &Path,
+    bundle_include_dir: &Path,
+    copied: &mut HashSet<PathBuf>,
+) -> Option<String> {
+    let path = Path::new(path_str);
+
+    let relative = if let Ok(rel) = path.strip_prefix(build_dir) {
+        let first = rel.components().next().and_then(|c| c.as_os_str().to_str());
+        if matches!(first, Some(name) if name.starts_with("ns_") || name == "installed_formulas") {
+            return None;
+        }
+        rel
+    } else if let Ok(rel) = path.strip_prefix(src_dir) {
+        rel
+    } else {
+        // Defensive fallback: every include token seen in a real manifest
+        // falls under build_dir or src_dir. Pass an unrecognized one
+        // through unchanged rather than panicking a release build over a
+        // genuinely novel case -- no worse than the pre-bundling behavior.
+        return Some(path_str.to_string());
+    };
+
+    if copied.insert(path.to_path_buf()) {
+        copy_dir_all(path, &bundle_include_dir.join(relative));
+    }
+
+    // Always `/`-joined, never OS-native-separator-joined: this string is
+    // written into manifest.v1 and may be read back on a different OS than
+    // the one that staged it (e.g. built on Linux, consumed on Windows).
+    let portable_relative = relative
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
+    Some(format!("include/{portable_relative}"))
+}
+
+/// Rejoins a manifest-recorded `cxx_includes` token against `bundle_dir` if
+/// it uses `bundle_include_path`'s `include/...` convention; passes
+/// anything else (the bare `-isystem` flag word, or an unrecognized-token
+/// absolute-path fallback) through unchanged.
+fn rejoin_bundle_include_token(token: &str, bundle_dir: &Path) -> String {
+    if let Some(rel) = token.strip_prefix("-Iinclude/") {
+        return format!("-I{}", bundle_dir.join("include").join(rel).display());
+    }
+    if let Some(rel) = token.strip_prefix("include/") {
+        return bundle_dir.join("include").join(rel).display().to_string();
+    }
+    token.to_string()
 }
 

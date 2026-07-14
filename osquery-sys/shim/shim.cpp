@@ -3,15 +3,20 @@
 
 #include "shim.h"
 
+#include <atomic>
 #include <cstring>
 #include <memory>
 #include <mutex>
 #include <new>
 #include <string>
+#include <vector>
 
+#include <glog/logging.h>
 #include <osquery/core/flags.h>
+#include <osquery/core/plugins/logger.h>
 #include <osquery/core/sql/query_data.h>
 #include <osquery/core/system.h>
+#include <osquery/registry/registry_factory.h>
 #include <osquery/sql/sql.h>
 #include <osquery/utils/info/tool_type.h>
 
@@ -38,11 +43,32 @@ bool g_shutdown_called = false;
 // osquery::Initializer stores pointers to the argc/argv it's given for its
 // entire lifetime (see osquery/core/system.h), so these must outlive it --
 // static storage duration, not locals of osquery_embed_init.
-int g_argc = 2;
+//
+// --logger_plugin=rust_bridge selects RustBridgeLoggerPlugin (defined
+// below) as the *only* active logger plugin, so every internal status log
+// (glog's LOG(INFO)/LOG(WARNING)/... calls throughout osquery's own code)
+// gets forwarded through osquery_embed_set_log_callback instead of
+// osquery's default "filesystem" logger plugin, which would otherwise
+// write them to on-disk log files -- another on-disk side effect this
+// embedded, in-process use case doesn't want, same reasoning as
+// --disable_extensions. NOTE: the CLI flag is `logger_plugin`, not
+// `logger` -- "logger" is only the *registry category* name
+// (RegistryFactory::get().getActive("logger") etc.); the actual CLI_FLAG
+// declared in osquery/logger/logger.cpp is `logger_plugin`. Passing
+// `--logger=...` fails at startup with gflags' own
+// "ERROR: unknown command line flag 'logger'".
+int g_argc = 3;
 char g_arg0[] = "osquery_embed";
 char g_arg1[] = "--disable_extensions=true";
-char* g_argv_storage[] = {g_arg0, g_arg1, nullptr};
+char g_arg2[] = "--logger_plugin=rust_bridge";
+char* g_argv_storage[] = {g_arg0, g_arg1, g_arg2, nullptr};
 char** g_argv = g_argv_storage;
+
+// Guarded by std::atomic rather than g_mutex: RustBridgeLoggerPlugin::
+// logStatus (below) reads this from whatever internal osquery thread is
+// relaying a status log, which must never block on the same mutex
+// osquery_embed_query/init/shutdown hold for unrelated reasons.
+std::atomic<osquery_embed_log_callback> g_log_callback{nullptr};
 
 char* dup_cstr(const std::string& s) {
   char* out = new (std::nothrow) char[s.size() + 1];
@@ -55,6 +81,63 @@ char* dup_cstr(const std::string& s) {
 }
 
 } // namespace
+
+namespace osquery {
+
+// Bridges osquery's own pluggable logger registry (NOT a raw glog log
+// sink -- see README/project notes for why the plugin registry is the
+// right layer to hook) to a single C callback, so a Rust consumer can
+// route osquery's internal status logs (INFO/WARNING/ERROR/FATAL)
+// through its own logging setup (e.g. the `log` crate) instead of them
+// going straight to stderr or an on-disk log file uncontrolled.
+class RustBridgeLoggerPlugin : public LoggerPlugin {
+ public:
+  bool usesLogStatus() override {
+    return true;
+  }
+
+ protected:
+  // Scheduled query *result* logging is a separate concern from internal
+  // status logging -- not routed through osquery_embed_log_callback here.
+  Status logString(const std::string& /*s*/) override {
+    return Status::success();
+  }
+
+  void init(const std::string& /*name*/,
+            const std::vector<StatusLogLine>& log) override {
+    // Matches upstream's own StdoutLoggerPlugin::init
+    // (plugins/logger/stdout.cpp): now that a plugin is actively
+    // receiving every status log instead, stop Glog's own direct-to-
+    // stderr writing so messages aren't duplicated.
+    FLAGS_alsologtostderr = false;
+    FLAGS_logtostderr = false;
+    FLAGS_stderrthreshold = 5;
+
+    // Replay whatever status logs accumulated before this plugin was
+    // activated (early startup logging -- see LoggerPlugin::init's own
+    // doc comment).
+    logStatus(log);
+  }
+
+  Status logStatus(const std::vector<StatusLogLine>& log) override {
+    auto callback = g_log_callback.load(std::memory_order_relaxed);
+    if (callback != nullptr) {
+      for (const auto& item : log) {
+        callback(static_cast<int32_t>(item.severity),
+                 item.filename.data(),
+                 item.filename.size(),
+                 static_cast<int32_t>(item.line),
+                 item.message.data(),
+                 item.message.size());
+      }
+    }
+    return Status::success();
+  }
+};
+
+REGISTER(RustBridgeLoggerPlugin, "logger", "rust_bridge");
+
+} // namespace osquery
 
 extern "C" int32_t osquery_embed_init(int argc, char** argv) {
   (void)argc;
@@ -172,4 +255,9 @@ extern "C" int32_t osquery_embed_query(const char* sql,
 
 extern "C" void osquery_embed_free_string(char* ptr) {
   delete[] ptr;
+}
+
+extern "C" void osquery_embed_set_log_callback(
+    osquery_embed_log_callback callback) {
+  g_log_callback.store(callback, std::memory_order_relaxed);
 }

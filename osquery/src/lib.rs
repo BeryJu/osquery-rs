@@ -5,6 +5,7 @@
 
 mod error;
 mod instance;
+mod logging;
 mod types;
 
 pub use error::OsqueryError;
