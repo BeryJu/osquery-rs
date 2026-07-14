@@ -346,10 +346,9 @@ by default it looks at `/usr/local/osquery-toolchain`
 2. **Stage 2 (in progress)**: prebuilt-artifact distribution (this
    document's "Default path: prebuilt download" and "Release process"
    sections) -- implemented, but unverified against a real tag push/release
-   as of this writing. CI is fully green for Linux x86_64, macOS, and
-   Windows (build + integration tests); the newly added Linux aarch64 job
-   is still being iterated on. Also: generalize the query API further (e.g.
-   typed columns).
+   as of this writing. CI is fully green on all 4 target triples (Linux
+   x86_64 and aarch64, macOS, Windows -- build + integration tests). Also:
+   generalize the query API further (e.g. typed columns).
 3. **Stage 3**: expose more `Initializer`/config knobs as real usage
    demands.
 
