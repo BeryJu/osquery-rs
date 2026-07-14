@@ -280,6 +280,14 @@ fn try_prebuilt(cache_root: &Path, src_dir: &Path, shim_dir: &Path) -> PrebuiltA
         .unwrap_or_else(|e| panic!("failed to read cached {}: {e}", manifest_path.display()));
     let manifest = parse_manifest(&manifest_text, &bundle_dir);
 
+    // See append_linux_default_linker_items's own comment for why this must
+    // be printed before anything that -L's the toolchain's own sysroot
+    // (already baked into the manifest's own recorded search paths, since
+    // it was captured from a from-source build that also prints this).
+    if env::var("TARGET").as_deref() == Ok("aarch64-unknown-linux-gnu") {
+        println!("cargo:rustc-link-search=native=/usr/lib64");
+    }
+
     let mut items = manifest.items;
     // Recompiled fresh locally every time, prebuilt path or not -- see
     // stage_prebuilt_package's own doc comment for why this (and the rest
@@ -1630,6 +1638,39 @@ fn resolve_token_path(tok: &str, link_cwd: &Path) -> String {
 ///   untouched by `collect_link_items` and not touched here.)
 fn append_linux_default_linker_items(items: &mut Vec<LinkItem>, sysroot: Option<&Path>) {
     let sysroot = sysroot.expect("OSQUERY_TOOLCHAIN_SYSROOT must be known to adapt link flags");
+
+    // The osquery-toolchain's own sysroot bundles a full set of glibc
+    // compatibility shims directly under usr/lib (libdl.so, librt.so,
+    // libresolv.so, ... all real ELF shared objects/symlinks, built
+    // against glibc 2.27 for this toolchain's own compile-time sysroot
+    // needs) alongside libc++.a/libc++abi.a/libclang_rt.builtins.a, which
+    // this crate genuinely needs `-L`'d for the final link. Since GNU ld
+    // resolves a bare `-l NAME` against whichever `-L` directory listing
+    // it *first*, and Cargo accumulates every `cargo:rustc-link-search`
+    // this whole build script prints (via any function, not just
+    // `emit_link_items`) in print order, printing the host's own real
+    // system library directory here -- before any later "-L" pointing at
+    // the toolchain's sysroot -- guarantees `-l dylib=dl`/`rt`/`resolv`/`c`
+    // resolve against the host's own matching-ABI shared libraries first.
+    // Without this, `-ldl` resolves to the toolchain's own bundled
+    // libdl.so instead (found only because it happens to live in the same
+    // directory as the static archives above) -- and *that* copy has its
+    // own unresolved internal references to older, glibc-2.27-specific
+    // @GLIBC_PRIVATE symbols (`_dl_addr`, `_dl_catch_error`, `_dl_sym`,
+    // `_dl_vsym`, plus similar ones from libc.so/librt.so/libpthread.so if
+    // referenced) that the host's actual (newer) glibc doesn't provide
+    // under this mismatched combination -- confirmed both via a real CI
+    // failure and by reproducing/fixing it locally with the identical
+    // toolchain release inside the identical manylinux_2_34_aarch64
+    // container: linking a trivial dlopen()-referencing program fails
+    // with this exact error when the toolchain's own usr/lib is searched
+    // before /usr/lib64, and succeeds when /usr/lib64 is searched first.
+    // Scoped to aarch64 like the whole-archive workaround this supports --
+    // x86_64 has never hit this because it doesn't whole-archive whatever
+    // newly pulls in a dlopen()-style call.
+    if env::var("TARGET").as_deref() == Ok("aarch64-unknown-linux-gnu") {
+        println!("cargo:rustc-link-search=native=/usr/lib64");
+    }
 
     move_dylib_to_end(items, "c");
     move_dylib_to_end(items, "resolv");
