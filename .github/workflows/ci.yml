@@ -138,7 +138,7 @@ jobs:
         run: cargo build --workspace -vv
 
       - name: cargo test (integration)
-        run: cargo test -p osquery --features integration-tests -vv -- --nocapture
+        run: cargo test -p osquery -vv -- --nocapture
 
   windows:
     name: Windows (x86_64)
@@ -203,4 +203,4 @@ jobs:
         run: cargo build --workspace -vv
 
       - name: cargo test (integration)
-        run: cargo test -p osquery --features integration-tests -vv -- --nocapture
+        run: cargo test -p osquery -vv -- --nocapture

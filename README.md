@@ -137,7 +137,7 @@ docker build -f docker/build.Dockerfile -t osquery-sys-build .
 docker run --rm -v "$(pwd)":/work -w /work osquery-sys-build \
   cargo build
 docker run --rm -v "$(pwd)":/work -w /work osquery-sys-build \
-  cargo test -p osquery --features integration-tests
+  cargo test -p osquery
 ```
 
 On Linux, `osquery-sys/build.rs` requires the

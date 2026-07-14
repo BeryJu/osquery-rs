@@ -21,4 +21,4 @@ trap 'kill "$HEARTBEAT_PID" 2>/dev/null || true' EXIT
 # KB per line for this project, past what GitHub Actions' log storage keeps
 # intact. `fold` keeps lines short; `set -o pipefail` above keeps cargo's
 # own exit code (not fold's) governing `set -e`.
-cargo test -p osquery --features integration-tests -vv -- --nocapture 2>&1 | fold -w 2000
+cargo test -p osquery -vv -- --nocapture 2>&1 | fold -w 2000

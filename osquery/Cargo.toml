@@ -15,9 +15,3 @@ log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-
-[features]
-# Gates tests/smoke.rs, which requires the full native osquery build to
-# have succeeded (see osquery-sys/build.rs) -- not run by a plain
-# `cargo test` since that build is heavy and platform-dependent.
-integration-tests = []

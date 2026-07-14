@@ -1,9 +1,8 @@
-#![cfg(feature = "integration-tests")]
-
 use std::path::Path;
 use std::sync::OnceLock;
 
 use osquery::{OsqueryError, OsqueryInstance};
+use serde::Deserialize;
 
 static INSTANCE: OnceLock<Result<OsqueryInstance, OsqueryError>> = OnceLock::new();
 
@@ -16,9 +15,17 @@ fn instance() -> &'static OsqueryInstance {
 
 #[test]
 fn select_users_no_err() {
-    let instance = instance();
+    #[derive(Deserialize, Debug)]
+    struct UserRow {
+        username: String,
+        uid: String,
+    }
 
-    assert!(instance.query("SELECT * FROM users").is_ok());
+    let instance = instance();
+    let result = instance.query::<UserRow>("SELECT * FROM users").unwrap();
+    assert!(result.rows.len() > 0);
+    assert!(!result.rows[0].uid.is_empty());
+    assert!(!result.rows[0].username.is_empty());
 }
 
 #[test]
@@ -42,7 +49,7 @@ fn select_1_end_to_end_with_no_socket() {
     let instance = instance();
 
     let result = instance
-        .query("SELECT 1 AS one")
+        .query_row("SELECT 1 AS one")
         .expect("SELECT 1 should succeed");
 
     assert_eq!(result.rows.len(), 1, "expected exactly one row: {result:?}");

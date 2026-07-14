@@ -58,8 +58,8 @@ the user directly or Dependabot automation):
 
 ## Immediate next step
 
-1. Get one fully green (`cargo build` + `cargo test --features
-   integration-tests` passing) run on all 3 platforms against current `main`.
+1. Get one fully green (`cargo build` + `cargo test` passing) run on all
+   3 platforms against current `main`.
    Use `gh run list --repo BeryJu/osquery-rs` / `gh run view` / `gh api
    repos/BeryJu/osquery-rs/actions/jobs/<id>/logs` to check status (note: the
    logs API only serves periodic snapshots for in-progress jobs, not a true

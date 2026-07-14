@@ -2,6 +2,9 @@ use std::ffi::c_char;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use serde::de::DeserializeOwned;
+
+use crate::Row;
 use crate::error::OsqueryError;
 use crate::types::QueryResult;
 
@@ -33,12 +36,8 @@ impl OsqueryInstance {
     /// already been started in this process (whether or not it has since
     /// been shut down).
     pub fn start() -> Result<Self, OsqueryError> {
-        if INITIALIZED.compare_exchange(
-            false,
-            true,
-            Ordering::SeqCst,
-            Ordering::SeqCst,
-        ) != Ok(false)
+        if INITIALIZED.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            != Ok(false)
         {
             return Err(OsqueryError::AlreadyInitialized);
         }
@@ -58,15 +57,17 @@ impl OsqueryInstance {
             osquery_sys::OSQUERY_EMBED_OK => Ok(OsqueryInstance {
                 shutdown_called: false,
             }),
-            osquery_sys::OSQUERY_EMBED_ALREADY_INITIALIZED => {
-                Err(OsqueryError::AlreadyInitialized)
-            }
+            osquery_sys::OSQUERY_EMBED_ALREADY_INITIALIZED => Err(OsqueryError::AlreadyInitialized),
             _ => Err(OsqueryError::Ffi { code }),
         }
     }
 
+    pub fn query_row(&self, sql: &str) -> Result<QueryResult<Row>, OsqueryError> {
+        self.query(sql)
+    }
+
     /// Runs a SQL query in-process and parses the JSON result into rows.
-    pub fn query(&self, sql: &str) -> Result<QueryResult, OsqueryError> {
+    pub fn query<T: DeserializeOwned>(&self, sql: &str) -> Result<QueryResult<T>, OsqueryError> {
         let mut out_json: *mut c_char = ptr::null_mut();
         let mut out_len: usize = 0;
 
@@ -84,7 +85,7 @@ impl OsqueryInstance {
         match code as u32 {
             osquery_sys::OSQUERY_EMBED_OK => {
                 let json = json_bytes.ok_or(OsqueryError::Ffi { code })?;
-                let result: QueryResult = serde_json::from_slice(&json)?;
+                let result: QueryResult<T> = serde_json::from_slice(&json)?;
                 Ok(result)
             }
             osquery_sys::OSQUERY_EMBED_QUERY_FAILED => {

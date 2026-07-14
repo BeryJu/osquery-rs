@@ -11,6 +11,6 @@ pub type Row = HashMap<String, String>;
 /// envelope on the wire.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(transparent)]
-pub struct QueryResult {
-    pub rows: Vec<Row>,
+pub struct QueryResult<T = Row> {
+    pub rows: Vec<T>,
 }
