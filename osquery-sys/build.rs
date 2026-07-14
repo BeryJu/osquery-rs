@@ -1352,8 +1352,16 @@ fn collect_link_items(link_line: &str, osqueryd_path: &Path, link_cwd: &Path) ->
     let mut items = Vec::new();
     let mut i = if tokens.is_empty() { 0 } else { 1 }; // token 0 is the driver itself
     let mut whole_archive = false;
+    // Apple ld64's `-Wl,-force_load <path>` is a one-shot pair (unlike the
+    // GNU `-Wl,--whole-archive`/`--no-whole-archive` bracket idiom, which
+    // toggles a *run* of following archives): it force-loads exactly the
+    // one archive named by the very next token. Captured-and-cleared at
+    // the top of each iteration so it can only ever apply to that single
+    // next token, regardless of which branch below ends up handling it.
+    let mut force_load_next = false;
 
     while i < tokens.len() {
+        let force_load_this = std::mem::take(&mut force_load_next);
         let tok = tokens[i].as_str();
 
         if cfg!(windows) {
@@ -1426,13 +1434,38 @@ fn collect_link_items(link_line: &str, osqueryd_path: &Path, link_cwd: &Path) ->
                 i += 1;
                 continue;
             }
+            // Two-token form, e.g. `-Wl,-force_load /abs/path/libFoo.a`
+            // (confirmed via the real osqueryd link.txt on macOS -- this
+            // is how CMake force-loads libraries whose only job is
+            // running static-initializer side effects, like table/plugin
+            // registration, since nothing else references their object
+            // files by symbol name).
+            if tok == "-Wl,-force_load" {
+                force_load_next = true;
+                i += 1;
+                continue;
+            }
+            // Defensive: a comma-joined single-token form
+            // (`-Wl,-force_load,/abs/path.a`), in case a different
+            // CMake/Xcode generator version ever emits it that way
+            // instead. Not observed in this repo's own link.txt, but
+            // cheap to handle alongside the two-token form above.
+            if let Some(rest) = tok.strip_prefix("-Wl,-force_load,") {
+                let resolved = resolve_token_path(rest, link_cwd);
+                items.push(link_item_for_archive(Path::new(&resolved), true));
+                i += 1;
+                continue;
+            }
             if tok.ends_with(".a") && is_osquery_main_archive(tok) {
                 i += 1;
                 continue;
             }
             if tok.ends_with(".a") {
                 let resolved = resolve_token_path(tok, link_cwd);
-                items.push(link_item_for_archive(Path::new(&resolved), whole_archive));
+                items.push(link_item_for_archive(
+                    Path::new(&resolved),
+                    whole_archive || force_load_this,
+                ));
                 i += 1;
                 continue;
             }
