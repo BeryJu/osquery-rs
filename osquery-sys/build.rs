@@ -1076,15 +1076,11 @@ fn num_jobs() -> String {
     // constrained memory (e.g. a capped Docker Desktop VM). Default to a
     // conservative cap and let callers with more memory raise it.
     //
-    // OSQUERY_SYS_CMAKE_JOBS overrides NUM_JOBS specifically for this
-    // CMake build, independent of Cargo's own `--jobs`/CARGO_BUILD_JOBS --
-    // Cargo always recomputes and overwrites NUM_JOBS itself for every
-    // build script invocation (confirmed directly: exporting NUM_JOBS in
-    // the calling shell does not survive), so there is no way to keep
-    // this multi-hour C++ build at a normal parallelism level while
-    // separately constraining Cargo's own Rust-side unit scheduling
-    // (e.g. to test a Cargo job-scheduling race theory) without a knob
-    // that bypasses NUM_JOBS entirely.
+    // OSQUERY_SYS_CMAKE_JOBS overrides NUM_JOBS specifically for this CMake
+    // build, independent of Cargo's own `--jobs`/CARGO_BUILD_JOBS -- Cargo
+    // always recomputes NUM_JOBS to match its own job count for every build
+    // script invocation, so this is the only way to constrain CMake's
+    // parallelism separately from Cargo's.
     env::var("OSQUERY_SYS_CMAKE_JOBS")
         .or_else(|_| env::var("NUM_JOBS"))
         .unwrap_or_else(|_| {
@@ -1194,47 +1190,24 @@ fn emit_link_items(items: &[LinkItem]) {
 }
 
 /// WORKAROUND, not a root-cause fix: on aarch64-unknown-linux-gnu
-/// specifically, every plain (non-whole-archive) `cargo:rustc-link-lib`
-/// directive `emit_link_items` prints reproducibly fails to reach the
-/// downstream `smoke`/`osquery` test binary's real link -- confirmed via
-/// RUSTFLAGS=--verbose showing the actual, non-abbreviated failing link
-/// command contains exactly the whole-archive'd archives and *zero* plain
-/// ones (not thirdparty_sqlite, not osquery_core, not even the final
-/// -lc++/-lc). Extensively ruled out as the cause, each via a clean local
-/// repro that reproduces every other dimension of this project's real
-/// build but still links correctly on real aarch64 hardware: a Cargo
-/// Host/Target Unit-kind duplication, the `+whole-archive` modifier
-/// mechanism itself, small- and full-scale (151-entry) directive counts,
-/// the exact manylinux_2_34_aarch64 container/pinned Rust 1.97.0
-/// toolchain/gcc-toolset-14 linker, real Cargo build parallelism
-/// (CARGO_BUILD_JOBS=1 on the real CI build did not fix it either), and
-/// 80,000 lines of non-"cargo:"-prefixed stdout volume before the real
-/// directives (simulating the real CMake build's own forwarded output).
-/// The root cause remains unidentified, but `+whole-archive` propagation
-/// has a 100% success rate everywhere this was tested (repro and real CI
-/// alike) versus 100% failure for plain propagation on this specific
-/// target -- and whole-archive is already documented above as a strictly
-/// stronger request that can only ever pull in a superset of what plain
-/// resolution would (larger binary, never a functional regression).
+/// specifically, plain (non-whole-archive) `cargo:rustc-link-lib`
+/// directives reproducibly fail to reach the downstream `smoke`/`osquery`
+/// test binary's real link, even though `emit_link_items` prints them
+/// correctly and the archives themselves build fine -- a real Cargo/rustc
+/// propagation gap whose root cause was never identified despite extensive
+/// isolation (it doesn't reproduce in a minimal repro matching this
+/// project's directive count/order/mix, container, toolchain, or build
+/// parallelism). `+whole-archive` propagation, by contrast, works
+/// reliably, and is already documented above as a strictly stronger
+/// request that can only pull in a superset of what plain resolution
+/// would -- so forcing every static lib to it here sidesteps the bug
+/// instead of chasing it further.
 ///
-/// Must be applied to `items` *after* compat_stubs gets pushed onto it, not
-/// before: an earlier version of this workaround ran before that push
-/// (compat_stubs staying unforced/plain), which surfaced a second, distinct
-/// bug -- compat_stubs.cpp's own `sysctl()` stub (needed because
-/// `osquery/tables/system/linux/sysctl_utils.cpp` references a symbol
-/// glibc removed years ago; see compat_stubs.cpp's own comment) is *also* a
-/// plain entry, so it was *also* silently dropped by the exact same
-/// propagation bug this whole workaround exists to route around --
-/// confirmed via a real CI run failing on undefined references to
-/// `sysctl`/several `@GLIBC_PRIVATE` symbols pulled in from
-/// `libc++abi.a(libunwind.cpp.o)` once whole-archiving finally let that
-/// object's dead, `__APPLE__`-only code path (never referenced under
-/// ordinary selective linking) get included too. Since `compile_compat_stubs`
-/// now passes `.cargo_metadata(false)` to suppress the `cc` crate's own
-/// automatic (and unavoidably plain) emission for that one archive, its
-/// *only* emission is now the explicit, force-eligible one here -- so
-/// applying this after the push, rather than before, correctly includes it
-/// with no modifier-conflict risk.
+/// Must run *after* compat_stubs is pushed onto `items`, not before:
+/// `compile_compat_stubs` uses `.cargo_metadata(false)` specifically so its
+/// archive has one single, force-eligible emission path here rather than
+/// also being auto-emitted (plain) by the `cc` crate -- see that
+/// function's own comment.
 fn force_whole_archive_workaround(items: &mut [LinkItem]) {
     if env::var("TARGET").as_deref() != Ok("aarch64-unknown-linux-gnu") {
         return;
@@ -1639,35 +1612,17 @@ fn resolve_token_path(tok: &str, link_cwd: &Path) -> String {
 fn append_linux_default_linker_items(items: &mut Vec<LinkItem>, sysroot: Option<&Path>) {
     let sysroot = sysroot.expect("OSQUERY_TOOLCHAIN_SYSROOT must be known to adapt link flags");
 
-    // The osquery-toolchain's own sysroot bundles a full set of glibc
-    // compatibility shims directly under usr/lib (libdl.so, librt.so,
-    // libresolv.so, ... all real ELF shared objects/symlinks, built
-    // against glibc 2.27 for this toolchain's own compile-time sysroot
-    // needs) alongside libc++.a/libc++abi.a/libclang_rt.builtins.a, which
-    // this crate genuinely needs `-L`'d for the final link. Since GNU ld
-    // resolves a bare `-l NAME` against whichever `-L` directory listing
-    // it *first*, and Cargo accumulates every `cargo:rustc-link-search`
-    // this whole build script prints (via any function, not just
-    // `emit_link_items`) in print order, printing the host's own real
-    // system library directory here -- before any later "-L" pointing at
-    // the toolchain's sysroot -- guarantees `-l dylib=dl`/`rt`/`resolv`/`c`
-    // resolve against the host's own matching-ABI shared libraries first.
-    // Without this, `-ldl` resolves to the toolchain's own bundled
-    // libdl.so instead (found only because it happens to live in the same
-    // directory as the static archives above) -- and *that* copy has its
-    // own unresolved internal references to older, glibc-2.27-specific
-    // @GLIBC_PRIVATE symbols (`_dl_addr`, `_dl_catch_error`, `_dl_sym`,
-    // `_dl_vsym`, plus similar ones from libc.so/librt.so/libpthread.so if
-    // referenced) that the host's actual (newer) glibc doesn't provide
-    // under this mismatched combination -- confirmed both via a real CI
-    // failure and by reproducing/fixing it locally with the identical
-    // toolchain release inside the identical manylinux_2_34_aarch64
-    // container: linking a trivial dlopen()-referencing program fails
-    // with this exact error when the toolchain's own usr/lib is searched
-    // before /usr/lib64, and succeeds when /usr/lib64 is searched first.
-    // Scoped to aarch64 like the whole-archive workaround this supports --
-    // x86_64 has never hit this because it doesn't whole-archive whatever
-    // newly pulls in a dlopen()-style call.
+    // The osquery-toolchain's own sysroot bundles glibc-2.27-era
+    // compatibility shims (libdl.so, librt.so, libresolv.so, ...) directly
+    // under usr/lib, the same directory libc++.a/libclang_rt.builtins.a
+    // below genuinely need `-L`'d. GNU ld resolves a bare `-l NAME` against
+    // whichever `-L` directory lists it first, so without this, `-ldl`
+    // resolves to the toolchain's own (ABI-mismatched) libdl.so instead of
+    // the host's, leaving its internal @GLIBC_PRIVATE references
+    // unresolved. Printing the host's own system directory here, before
+    // any `-L` pointing at the toolchain's sysroot, guarantees it wins.
+    // Scoped to aarch64 like the whole-archive workaround below, which is
+    // what exposes a call into whatever needs this in the first place.
     if env::var("TARGET").as_deref() == Ok("aarch64-unknown-linux-gnu") {
         println!("cargo:rustc-link-search=native=/usr/lib64");
     }
@@ -1678,25 +1633,16 @@ fn append_linux_default_linker_items(items: &mut Vec<LinkItem>, sysroot: Option<
     let libcxx = sysroot.join("usr/lib/libc++.a");
     let libcxxabi = sysroot.join("usr/lib/libc++abi.a");
 
-    // force_whole_archive_workaround (see its own doc comment) whole-archives
-    // both of these on aarch64-unknown-linux-gnu, which exposes a real
-    // duplicate: this toolchain's libc++.a and libc++abi.a each separately
-    // bundle a full copy of LLVM's libunwind, split across these 9 object
-    // files (the complete set, confirmed directly via `ar t` against both
-    // archives and diffing their member lists -- not just libunwind.cpp.o,
-    // which was the first one found via a real CI failure and turned out to
-    // be only one of several), normally invisible because selective
-    // (non-whole-archive) linking only ever pulls in whichever copy is
-    // needed first. Whole-archiving both makes ld see the exact same
-    // objects defined twice ("multiple definition of `__unw_init_local'",
-    // `_Unwind_RaiseException`, etc.) -- confirmed via real CI runs. Both
-    // copies are built from the identical upstream source, so keeping
-    // either is equivalent; strip all of them from libc++.a specifically
-    // (leaving libc++abi.a's copies, matching upstream LLVM's usual
-    // convention of libc++abi being the unwinder's canonical home) so
-    // whole-archiving both is safe. Scoped to aarch64 like the workaround
-    // it exists to support -- x86_64 never whole-archives these, so never
-    // hits this.
+    // force_whole_archive_workaround whole-archives both of these on
+    // aarch64, which exposes a real duplicate: libc++.a and libc++abi.a
+    // each separately bundle a full copy of LLVM's libunwind, split across
+    // these 9 object files (confirmed via `ar t` against both archives),
+    // normally invisible under selective linking since only one copy ever
+    // gets pulled in. Whole-archiving both makes ld see every object
+    // defined twice. Both copies come from identical upstream source, so
+    // stripping them from libc++.a (leaving libc++abi.a's, the unwinder's
+    // conventional home) is safe. Scoped to aarch64 like the workaround it
+    // supports.
     const LIBUNWIND_OBJECTS_DUPLICATED_IN_LIBCXX: &[&str] = &[
         "libunwind.cpp.o",
         "Unwind-EHABI.cpp.o",
@@ -1737,13 +1683,9 @@ fn append_linux_default_linker_items(items: &mut Vec<LinkItem>, sysroot: Option<
 }
 
 /// Deletes `member` from the static archive at `archive_path` via `ar d`,
-/// first checking with `ar t` whether it's actually present -- `ar d`
-/// itself exits non-zero ("not found in archive") for an already-absent
-/// member, which this function needs to tolerate silently so it stays safe
-/// to run against a persistent, locally-reused toolchain install across
-/// multiple builds (a fresh CI run always has it present on the first
-/// build.rs invocation, since the toolchain itself is freshly downloaded
-/// every time, but that isn't guaranteed for every possible caller).
+/// first checking with `ar t` whether it's present -- `ar d` itself exits
+/// non-zero for an already-absent member, so this checks first to stay
+/// safe against a locally-reused toolchain install across multiple builds.
 fn strip_archive_member_if_present(archive_path: &Path, member: &str) {
     let listing = Command::new("ar")
         .arg("t")
@@ -1854,15 +1796,13 @@ fn compile_shim(
 /// placement.
 ///
 /// `.cargo_metadata(false)` suppresses `cc::Build::compile`'s own automatic
-/// `cargo:rustc-link-lib=static=osquery_embed_compat_stubs`/
-/// `cargo:rustc-link-search=...` emission -- the caller pushes this
-/// archive's path into its own `items` list and emits it explicitly via
-/// `emit_link_items` instead (see that call site's own comment for why:
-/// this archive specifically needs `force_whole_archive_workaround` on
-/// aarch64, and having *two* separate emission sources for the same
-/// library name with different modifiers is exactly what previously made
-/// rustc hard-error with "overriding linking modifiers from command line
-/// is not supported").
+/// (always-plain) `cargo:rustc-link-lib`/`-search` emission for this
+/// archive -- the caller emits it explicitly via `emit_link_items` instead,
+/// so this archive has exactly one emission path and can safely be forced
+/// to `+whole-archive` by `force_whole_archive_workaround`. Two separate
+/// emissions for the same library with conflicting modifiers is a rustc
+/// hard error ("overriding linking modifiers from command line is not
+/// supported").
 fn compile_compat_stubs(shim_dir: &Path, cxx_compiler: &Path) -> PathBuf {
     let mut build = cc::Build::new();
     build
