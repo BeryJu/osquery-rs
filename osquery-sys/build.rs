@@ -1634,14 +1634,29 @@ fn append_linux_default_linker_items(items: &mut Vec<LinkItem>, sysroot: Option<
     move_dylib_to_end(items, "c");
     move_dylib_to_end(items, "resolv");
 
-    items.push(link_item_for_archive(
-        &sysroot.join("usr/lib/libc++.a"),
-        false,
-    ));
-    items.push(link_item_for_archive(
-        &sysroot.join("usr/lib/libc++abi.a"),
-        false,
-    ));
+    let libcxx = sysroot.join("usr/lib/libc++.a");
+    let libcxxabi = sysroot.join("usr/lib/libc++abi.a");
+
+    // force_whole_archive_workaround (see its own doc comment) whole-archives
+    // both of these on aarch64-unknown-linux-gnu, which exposes a real
+    // duplicate: this toolchain's libc++.a and libc++abi.a each separately
+    // bundle a full copy of LLVM's libunwind (libunwind.cpp.o), normally
+    // invisible because selective (non-whole-archive) linking only ever
+    // pulls in whichever copy is needed first. Whole-archiving both makes
+    // ld see the exact same object defined twice ("multiple definition of
+    // `__unw_init_local'", `logAPIs`, etc.) -- confirmed via a real CI run.
+    // Both copies are built from the identical upstream source, so keeping
+    // either is equivalent; strip it from libc++.a specifically (leaving
+    // libc++abi.a's copy, matching upstream LLVM's usual convention of
+    // libc++abi being the unwinder's canonical home) so whole-archiving
+    // both is safe. Scoped to aarch64 like the workaround it exists to
+    // support -- x86_64 never whole-archives these, so never hits this.
+    if env::var("TARGET").as_deref() == Ok("aarch64-unknown-linux-gnu") {
+        strip_archive_member_if_present(&libcxx, "libunwind.cpp.o");
+    }
+
+    items.push(link_item_for_archive(&libcxx, false));
+    items.push(link_item_for_archive(&libcxxabi, false));
 
     // Several osquery/third-party objects (OpenSSL's threads_pthread.c,
     // librdkafka, boost, libc++ itself, ...) were compiled by the
@@ -1660,6 +1675,53 @@ fn append_linux_default_linker_items(items: &mut Vec<LinkItem>, sysroot: Option<
         )
     });
     items.push(link_item_for_archive(&builtins, false));
+}
+
+/// Deletes `member` from the static archive at `archive_path` via `ar d`,
+/// first checking with `ar t` whether it's actually present -- `ar d`
+/// itself exits non-zero ("not found in archive") for an already-absent
+/// member, which this function needs to tolerate silently so it stays safe
+/// to run against a persistent, locally-reused toolchain install across
+/// multiple builds (a fresh CI run always has it present on the first
+/// build.rs invocation, since the toolchain itself is freshly downloaded
+/// every time, but that isn't guaranteed for every possible caller).
+fn strip_archive_member_if_present(archive_path: &Path, member: &str) {
+    let listing = Command::new("ar")
+        .arg("t")
+        .arg(archive_path)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn ar t on {}: {e}", archive_path.display()));
+    if !listing.status.success() {
+        panic!(
+            "ar t on {} failed: {}",
+            archive_path.display(),
+            listing.status
+        );
+    }
+    let present = String::from_utf8_lossy(&listing.stdout)
+        .lines()
+        .any(|line| line == member);
+    if !present {
+        return;
+    }
+
+    let status = Command::new("ar")
+        .arg("d")
+        .arg(archive_path)
+        .arg(member)
+        .status()
+        .unwrap_or_else(|e| {
+            panic!(
+                "failed to spawn ar d to strip {member} from {}: {e}",
+                archive_path.display()
+            )
+        });
+    if !status.success() {
+        panic!(
+            "ar d failed to strip {member} from {}: {status}",
+            archive_path.display()
+        );
+    }
 }
 
 /// Removes the first `Dylib(name)` item found (wherever it currently is)
