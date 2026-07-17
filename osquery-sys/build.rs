@@ -288,12 +288,14 @@ fn try_prebuilt(cache_root: &Path, src_dir: &Path, shim_dir: &Path) -> PrebuiltA
         println!("cargo:rustc-link-search=native=/usr/lib64");
     }
 
+    let (cxx_compiler, sysroot) = resolve_prebuilt_compiler(&manifest);
+
     let mut items = manifest.items;
     // Recompiled fresh locally every time, prebuilt path or not -- see
     // stage_prebuilt_package's own doc comment for why this (and the rest
     // of the shim) is never itself part of the bundle.
     items.push(link_item_for_archive(
-        &compile_compat_stubs(shim_dir, &manifest.cxx_compiler),
+        &compile_compat_stubs(shim_dir, &cxx_compiler),
         false,
     ));
     force_whole_archive_workaround(&mut items);
@@ -302,8 +304,8 @@ fn try_prebuilt(cache_root: &Path, src_dir: &Path, shim_dir: &Path) -> PrebuiltA
     compile_shim(
         shim_dir,
         src_dir,
-        &manifest.cxx_compiler,
-        manifest.sysroot.as_deref(),
+        &cxx_compiler,
+        sysroot.as_deref(),
         &manifest.cxx_defines,
         &manifest.cxx_includes,
     );
@@ -316,6 +318,53 @@ fn try_prebuilt(cache_root: &Path, src_dir: &Path, shim_dir: &Path) -> PrebuiltA
     );
 
     PrebuiltAttempt::Used
+}
+
+/// Resolves the actual local C++ compiler (and matching sysroot, on Linux)
+/// to compile the shim against a downloaded prebuilt bundle with.
+///
+/// `manifest.cxx_compiler`/`manifest.sysroot` are the *release CI machine's*
+/// own absolute paths -- meaningless taken literally on a consumer's
+/// machine, which is a different filesystem entirely. On Linux, the shim
+/// must be compiled with the same osquery-toolchain (clang+libc++) osquery
+/// itself was built with to stay ABI-compatible with the prebuilt archives
+/// it links against (see `compile_shim`'s doc comment) -- the from-source
+/// path already resolves that toolchain via `OSQUERY_TOOLCHAIN_SYSROOT`
+/// (default `/usr/local/osquery-toolchain`), so re-resolve against that same
+/// locally-known location rather than trusting the manifest's recorded path.
+/// macOS/Windows compilers are already at portable, standard locations
+/// (Xcode's `/usr/bin/clang++`, MSVC's `cc`-auto-detected `cl.exe`), so the
+/// manifest's recorded path is used as-is there.
+fn resolve_prebuilt_compiler(manifest: &PrebuiltManifest) -> (PathBuf, Option<PathBuf>) {
+    if !cfg!(target_os = "linux") {
+        return (manifest.cxx_compiler.clone(), manifest.sysroot.clone());
+    }
+
+    let local_sysroot = PathBuf::from(
+        env::var("OSQUERY_TOOLCHAIN_SYSROOT")
+            .unwrap_or_else(|_| "/usr/local/osquery-toolchain".to_string()),
+    );
+    let local_compiler = local_sysroot.join("usr/bin/clang++");
+    if local_compiler.exists() {
+        return (local_compiler, Some(local_sysroot));
+    }
+
+    if manifest.cxx_compiler.exists() {
+        return (manifest.cxx_compiler.clone(), manifest.sysroot.clone());
+    }
+
+    panic!(
+        "osquery-sys: this prebuilt bundle's shim needs the osquery-toolchain (LLVM/libc++) \
+         osquery itself was built with, to stay ABI-compatible with the prebuilt archives -- \
+         neither the locally-resolved toolchain ({}) nor the path recorded by the release build \
+         ({}) exists on this machine. Install the osquery-toolchain (see README.md's \
+         \"osquery-toolchain\" section / docker/build.Dockerfile) and either leave it at the \
+         default location or point OSQUERY_TOOLCHAIN_SYSROOT at it, or set \
+         OSQUERY_SYS_FORCE_SOURCE_BUILD=1 to build from source instead (which requires the same \
+         toolchain either way on Linux).",
+        local_compiler.display(),
+        manifest.cxx_compiler.display(),
+    );
 }
 
 /// Downloads, verifies, and extracts the prebuilt bundle for `target` into
@@ -336,6 +385,7 @@ fn download_and_verify_bundle(target: &str, version: &str, bundle_dir: &Path) ->
     let url = format!(
         "{RELEASE_REPO}/releases/download/v{version}/osquery-sys-{version}-{target}.tar.zst"
     );
+    println!("cargo:warning=osquery-sys: downloading prebuilt bundle for {target} from {url}");
     let response = ureq::get(&url)
         .call()
         .map_err(|e| format!("failed to download prebuilt bundle from {url}: {e}"))?;
