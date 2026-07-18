@@ -203,11 +203,20 @@ extern "C" int32_t osquery_embed_query(const char* sql,
     *out_len = 0;
   }
 
-  {
-    std::lock_guard<std::mutex> lock(g_mutex);
-    if (g_initializer == nullptr) {
-      return OSQUERY_EMBED_NOT_INITIALIZED;
-    }
+  // Held for the whole call, not just the init check below: osquery's
+  // query engine and table generators (e.g. the `users` table's
+  // getpwnam/getpwuid, which use process-wide static buffers rather than
+  // the thread-safe `_r` variants, and macOS's OpenDirectory calls) plus
+  // its internal logger plumbing are not safe for concurrent invocation
+  // from multiple threads at once -- osquery's own dispatcher normally
+  // only ever runs one query at a time. Without this, two Rust callers
+  // (or two tests running in parallel against a shared OsqueryInstance)
+  // racing into osquery::query() concurrently intermittently throws a
+  // std::future_errc::no_state exception, surfacing here as a generic
+  // "no state" QueryFailed error from virtual_table.cpp's own catch block.
+  std::lock_guard<std::mutex> lock(g_mutex);
+  if (g_initializer == nullptr) {
+    return OSQUERY_EMBED_NOT_INITIALIZED;
   }
 
   try {
