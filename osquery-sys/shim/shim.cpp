@@ -161,6 +161,30 @@ extern "C" int32_t osquery_embed_init(int argc, char** argv) {
     // config/flagfile the shell auto-loads tried to flip it back.
     osquery::FLAGS_disable_extensions = true;
 
+    // Mirrors upstream osquery/main/main.cpp's own call order (initDaemon()
+    // then initWorkerWatcher(), both before start()). initDaemon() is a
+    // no-op here (its own !isDaemon() guard returns immediately for
+    // ToolType::SHELL), but initWorkerWatcher() is NOT: on Windows it's the
+    // only place that arms GlobalUsersGroupsCache's std::shared_future<void>
+    // members and starts the UsersService/GroupsService background services
+    // that actually populate the users/groups tables (see
+    // osquery/core/windows/global_users_groups_cache.{h,cpp} and
+    // osquery/core/init.cpp's Initializer::initWorkerWatcher). Nothing else
+    // in this shim ever called it, so on Windows that future stayed a
+    // default-constructed (no shared state) std::shared_future forever --
+    // GlobalUsersGroupsCache::getUsersCache()'s wait_for() on it throws
+    // std::future_error(future_errc::no_state), surfacing as a "no state"
+    // QueryFailed error from virtual_table.cpp on every `users`/`groups`
+    // query. Safe to call unconditionally on every platform: with the shell
+    // tool type forcing FLAGS_disable_watchdog=true (set inside the
+    // Initializer constructor above, before ParseCommandLineFlags returns)
+    // and no autoloaded extensions, isWatcher() is false, so the rest of
+    // initWorkerWatcher()'s body (initWatcher()) returns without blocking or
+    // spawning any process -- exactly what osquery's own shell tool does,
+    // not something novel to this shim.
+    g_initializer->initDaemon();
+    g_initializer->initWorkerWatcher();
+
     g_initializer->start();
     return OSQUERY_EMBED_OK;
   } catch (const std::exception&) {
