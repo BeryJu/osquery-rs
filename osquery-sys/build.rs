@@ -568,7 +568,14 @@ fn stage_prebuilt_package(
     // walk with an explicit cursor rather than `.map()` so a pair's two
     // tokens are classified/dropped together. Every path gets bundled
     // (see bundle_include_path) rather than staying a raw absolute path
-    // from this machine, which a consumer could never resolve.
+    // from this machine, which a consumer could never resolve. MSVC's
+    // "-external:I" (CMake's Windows/NMake-generator equivalent of
+    // "-isystem", used for e.g. boost's thirdparty include dirs) can appear
+    // either as a "-external:I"/"path" pair or concatenated as
+    // "-external:Ipath" -- no local Windows build environment to confirm
+    // which, so both are handled defensively, and always re-emitted
+    // concatenated (MSVC accepts that form, and it keeps
+    // rejoin_bundle_include_token's counterpart simple).
     let mut copied_include_dirs: HashSet<PathBuf> = HashSet::new();
     let mut rewritten_includes: Vec<String> = Vec::new();
     let mut i = 0;
@@ -598,6 +605,31 @@ fn stage_prebuilt_package(
                 &mut copied_include_dirs,
             ) {
                 rewritten_includes.push(format!("-I{rewritten}"));
+            }
+            i += 1;
+        } else if tok == "-external:I" {
+            let path_str = includes
+                .get(i + 1)
+                .unwrap_or_else(|| panic!("dangling -external:I with no following path in cxx_includes"));
+            if let Some(rewritten) = bundle_include_path(
+                path_str,
+                src_dir,
+                build_dir,
+                &bundle_include_dir,
+                &mut copied_include_dirs,
+            ) {
+                rewritten_includes.push(format!("-external:I{rewritten}"));
+            }
+            i += 2;
+        } else if let Some(path_str) = tok.strip_prefix("-external:I") {
+            if let Some(rewritten) = bundle_include_path(
+                path_str,
+                src_dir,
+                build_dir,
+                &bundle_include_dir,
+                &mut copied_include_dirs,
+            ) {
+                rewritten_includes.push(format!("-external:I{rewritten}"));
             }
             i += 1;
         } else {
@@ -1987,7 +2019,8 @@ fn compile_compat_stubs(shim_dir: &Path, cxx_compiler: &Path) -> PathBuf {
 /// Parses `CXX_DEFINES`/`CXX_INCLUDES` out of a target's CMake-generated
 /// `flags.make` (Makefiles generator), returning each as a standalone
 /// pre-formed compiler flag (e.g. `-DFOO=1`, `-I<path>`, `-isystem`,
-/// `<path>`) in original order, ready to hand to `cc::Build::flag()`. See
+/// `<path>`, or MSVC's `-external:I<path>`) in original order, ready to hand
+/// to `cc::Build::flag()`. See
 /// `split_generated_flags` for how the actual tokenizing differs between
 /// Unix (real `/bin/sh -c` shell-word unescaping, since that's how `make`
 /// invokes the compiler there) and Windows (no shell involved at all --
@@ -2118,10 +2151,10 @@ fn copy_dir_all(src: &Path, dst: &Path) {
 }
 
 /// Classifies a `cxx_includes` path token (already stripped of any leading
-/// `-I`/`-isystem`) against `build_dir`/`src_dir` and either bundles it into
-/// `package_dir/include/...` (returning the bundle-relative `include/...`
-/// replacement, copying it at most once per unique source directory via
-/// `copied`) or drops it entirely (returning `None`).
+/// `-I`/`-isystem`/`-external:I`) against `build_dir`/`src_dir` and either
+/// bundles it into `package_dir/include/...` (returning the bundle-relative
+/// `include/...` replacement, copying it at most once per unique source
+/// directory via `copied`) or drops it entirely (returning `None`).
 ///
 /// Dropped: CMake's own `ns_*`-prefixed virtual-namespace directories
 /// (`cmake/utilities.cmake`'s include-namespace helper -- symlink farms
@@ -2188,6 +2221,9 @@ fn bundle_include_path(
 fn rejoin_bundle_include_token(token: &str, bundle_dir: &Path) -> String {
     if let Some(rel) = token.strip_prefix("-Iinclude/") {
         return format!("-I{}", bundle_dir.join("include").join(rel).display());
+    }
+    if let Some(rel) = token.strip_prefix("-external:Iinclude/") {
+        return format!("-external:I{}", bundle_dir.join("include").join(rel).display());
     }
     if let Some(rel) = token.strip_prefix("include/") {
         return bundle_dir.join("include").join(rel).display().to_string();
