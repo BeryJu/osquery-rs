@@ -4,6 +4,7 @@
 #include "shim.h"
 
 #include <atomic>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -186,6 +187,27 @@ extern "C" int32_t osquery_embed_init(int argc, char** argv) {
     g_initializer->initWorkerWatcher();
 
     g_initializer->start();
+
+    // initWorkerWatcher() above (Windows only) starts real Dispatcher-
+    // managed background service threads (UsersService/GroupsService), but
+    // Initializer::~Initializer() is a deliberately empty no-op upstream --
+    // only an explicit Initializer::shutdown() call (see
+    // osquery_embed_shutdown below) stops/joins them via
+    // Dispatcher::stopServices()/joinServices(). The `osquery` Rust crate
+    // does call that from OsqueryInstance's Drop impl, but a caller that
+    // stores its OsqueryInstance in a `static`/leaked context (as this
+    // crate's own smoke tests do, via a `static OnceLock`) never runs Drop
+    // at process exit -- Rust never destructs statics. Left unaddressed,
+    // those background threads are still running, unjoined, when the
+    // process tears down, which is a plausible way to see a Windows
+    // STATUS_STACK_BUFFER_OVERRUN crash at exit even after every test
+    // passed. Register a normal CRT atexit hook as a backstop so a clean
+    // shutdown always happens before process teardown regardless of
+    // whether any Rust Drop ever runs; osquery_embed_shutdown() is
+    // idempotent (see g_shutdown_called below), so this is harmless even
+    // when the Rust side also calls it explicitly.
+    std::atexit([]() { osquery_embed_shutdown(); });
+
     return OSQUERY_EMBED_OK;
   } catch (const std::exception&) {
     g_initializer.reset();
