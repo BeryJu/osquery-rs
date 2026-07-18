@@ -231,7 +231,7 @@ by default it looks at `/usr/local/osquery-toolchain`
    the latter exists because `cargo publish` needs a real version
    requirement on that path dependency, not just a path; see the comment
    there) to the same new value. Commit.
-2. Tag that commit `v<version>` (e.g. `v0.2.0`) and push the tag.
+2. Tag that commit `v<version>` (e.g. `v0.2.1`) and push the tag.
 3. `.github/workflows/release.yml` takes over automatically: builds
    osquery from source for all 4 target triples, packages each into a prebuilt
    bundle, uploads them as a **draft** GitHub Release, commits the
