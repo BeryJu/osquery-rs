@@ -16,6 +16,11 @@
 #include <thread>
 #include <vector>
 
+#if !defined(_WIN32)
+#include <array>
+#include <signal.h>
+#endif
+
 #include <glog/logging.h>
 #include <osquery/core/flags.h>
 #include <osquery/core/plugins/logger.h>
@@ -121,6 +126,37 @@ char* dup_cstr(const std::string& s) {
   return out;
 }
 
+#if !defined(_WIN32)
+// osquery::Initializer's constructor/start() install raw signal()/
+// sigaction() handlers for these signals, unconditionally replacing
+// whatever the host process (e.g. Rust/tokio via signal-hook-registry) had
+// installed -- confirmed both by reading this behavior and documented on
+// the Rust side in osquery::instance.rs. In this embedded, no-dispatcher-
+// loop use case, osquery's own replacement handler is never observed by
+// anything (there's no osquery main loop polling a "shutdown requested"
+// flag), so once it's installed, the host process's own SIGINT/SIGTERM
+// handling silently stops working. Save the host's dispositions before
+// Initializer construction and restore them right after, so this embedded
+// init doesn't leave the host process unable to be signaled.
+constexpr int kGuardedSignals[] = {SIGHUP, SIGINT, SIGTERM, SIGABRT, SIGUSR1};
+
+std::array<struct sigaction, std::size(kGuardedSignals)>
+save_signal_dispositions() {
+  std::array<struct sigaction, std::size(kGuardedSignals)> saved{};
+  for (size_t i = 0; i < std::size(kGuardedSignals); ++i) {
+    sigaction(kGuardedSignals[i], nullptr, &saved[i]);
+  }
+  return saved;
+}
+
+void restore_signal_dispositions(
+    const std::array<struct sigaction, std::size(kGuardedSignals)>& saved) {
+  for (size_t i = 0; i < std::size(kGuardedSignals); ++i) {
+    sigaction(kGuardedSignals[i], &saved[i], nullptr);
+  }
+}
+#endif // !defined(_WIN32)
+
 } // namespace
 
 namespace osquery {
@@ -200,6 +236,11 @@ extern "C" int32_t osquery_embed_init(int argc, char** argv) {
 
   g_owner_thread = std::thread([&init_result_promise]() {
     int32_t result_code = OSQUERY_EMBED_OK;
+#if !defined(_WIN32)
+    // See kGuardedSignals' own doc comment: Initializer construction/start()
+    // below is about to hijack the host process's signal handlers.
+    auto saved_signals = save_signal_dispositions();
+#endif
     try {
       // Belt-and-suspenders #1: set before construction, in case anything
       // during construction (before flag parsing) reads it.
@@ -247,6 +288,13 @@ extern "C" int32_t osquery_embed_init(int argc, char** argv) {
       g_initializer.reset();
       result_code = OSQUERY_EMBED_UNKNOWN;
     }
+
+#if !defined(_WIN32)
+    // Undo whatever signal handlers Initializer construction/start() just
+    // installed, regardless of success/failure -- a partially-constructed
+    // Initializer may still have installed them before an exception unwound.
+    restore_signal_dispositions(saved_signals);
+#endif
 
     init_result_promise.set_value(result_code);
 
