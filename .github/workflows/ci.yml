@@ -186,6 +186,7 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           cache: false
+          build-warnings: warn
 
       - name: Restore osquery source + native build cache
         uses: actions/cache@v6

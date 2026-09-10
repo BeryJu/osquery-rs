@@ -187,6 +187,8 @@ jobs:
       - uses: ilammy/msvc-dev-cmd@v1
 
       - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          build-warnings: warn
 
       - name: Restore osquery source + native build cache
         uses: actions/cache@v6
