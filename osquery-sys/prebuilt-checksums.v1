@@ -1,22 +1,32 @@
 # osquery-sys prebuilt bundle checksums, schema v1
 #
-# One line per target triple: TARGET<TAB>SHA256_OF_TAR_ZST (64 lowercase hex
-# chars). This file is embedded into the crate itself via include_str! in
-# build.rs, so the expected hash for a downloaded prebuilt bundle always
-# comes from the same crates.io-published source tree as build.rs's own
-# verification logic -- never from the network location serving the bundle
-# itself. See build.rs's prebuilt-download path and NEXT_STEPS.md /
+# One line per target triple + archive format: TARGET<TAB>FORMAT<TAB>
+# SHA256_OF_ARCHIVE (64 lowercase hex chars), where FORMAT is one of the
+# entries in build.rs's `ARCHIVE_FORMATS` ("tar.gz" or "tar.zst"). A given
+# target can have zero, one, or both format lines -- build.rs's
+# `download_and_verify_bundle` tries each `ARCHIVE_FORMATS` entry in order
+# and uses whichever one both has a checksum here and actually downloads +
+# extracts successfully (see that constant's doc comment for why "tar.gz"
+# is tried before "tar.zst": plain gzip decodes on every `tar` in
+# existence, including hosts like AlmaLinux 8 whose stock `tar` has no
+# zstd support at all).
+#
+# This file is embedded into the crate itself via include_str! in build.rs,
+# so the expected hash for a downloaded prebuilt bundle always comes from
+# the same crates.io-published source tree as build.rs's own verification
+# logic -- never from the network location serving the bundle itself. See
+# build.rs's prebuilt-download path and NEXT_STEPS.md /
 # .github/workflows/release.yml for how this file gets populated: the
-# release workflow computes each platform's real bundle hash as part of the
-# same build that gets uploaded, then commits the result here before
-# publishing the GitHub Release.
+# release workflow computes each platform's real bundle hash (for both
+# archive formats) as part of the same build that gets uploaded, then
+# commits the result here before publishing the GitHub Release.
 #
 # Empty (no entries below) until the first tagged release's CI run
 # populates it -- until then, every target falls back to a from-source
 # build with an informational cargo:warning rather than a hard error, since
 # "no prebuilt exists yet for this crate version" isn't a release-process
 # bug, just the initial/pre-release state.
-x86_64-unknown-linux-gnu	726f86cb33f90a6bd356fb42956ca06d467bdb257e8689f7de891e11f49e35c9
-aarch64-unknown-linux-gnu	96b1c42a6123f30bedc6544402e9a1529c3572b5d430e72c2a153b2d31b18068
-aarch64-apple-darwin	bcbf707b1e832ba2ec081c144cd4b77f9c79db72678e90d291723578c26cb63b
-x86_64-pc-windows-msvc	b827262412b2a0e981e1bf6e88e9574562af047a3f9ec5c57820f13106732eb3
+x86_64-unknown-linux-gnu	tar.zst	726f86cb33f90a6bd356fb42956ca06d467bdb257e8689f7de891e11f49e35c9
+aarch64-unknown-linux-gnu	tar.zst	96b1c42a6123f30bedc6544402e9a1529c3572b5d430e72c2a153b2d31b18068
+aarch64-apple-darwin	tar.zst	bcbf707b1e832ba2ec081c144cd4b77f9c79db72678e90d291723578c26cb63b
+x86_64-pc-windows-msvc	tar.zst	b827262412b2a0e981e1bf6e88e9574562af047a3f9ec5c57820f13106732eb3

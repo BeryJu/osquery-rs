@@ -65,8 +65,10 @@ from any project.
 For the three published target triples (`x86_64-unknown-linux-gnu`,
 `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`), `osquery-sys/build.rs`
 downloads a prebuilt archive bundle from this repo's GitHub Releases
-(`osquery-sys-<version>-<target>.tar.zst`, one per tagged release -- see
-"Release process" below), verifies its SHA-256 against a hash baked into
+(`osquery-sys-<version>-<target>.tar.zst`, or `.tar.gz` as a fallback for
+hosts whose `tar` lacks zstd support -- e.g. AlmaLinux 8 -- one pair per
+tagged release; see "Release process" below), verifies its SHA-256 against
+a hash baked into
 the crate's own committed source (`prebuilt-checksums.v1`, via
 `include_str!` -- the expected hash never comes from the network, so
 compromising only the release asset can't forge a matching one), and links
