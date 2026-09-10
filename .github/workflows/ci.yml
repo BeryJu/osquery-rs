@@ -118,7 +118,7 @@ jobs:
       - name: Install build prerequisites
         run: brew install ccache git git-lfs cmake python clang-format flex bison
 
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           cache: false
 
@@ -183,7 +183,7 @@ jobs:
       # forces on Windows.
       - uses: ilammy/msvc-dev-cmd@v1
 
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           cache: false
 
