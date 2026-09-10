@@ -13,6 +13,11 @@
 //! `osquery::Initializer` is known to touch (SIGUSR1) *before* the first
 //! `OsqueryInstance::start()` call in this process, then asserts the
 //! handler survives that call unchanged.
+//!
+//! Unix-only: SIGUSR1 and `libc::sigaction` don't exist on Windows (osquery
+//! installs no POSIX signal handlers there either), so this whole file is
+//! compiled out for other targets rather than failing to build.
+#![cfg(unix)]
 
 use std::mem;
 
