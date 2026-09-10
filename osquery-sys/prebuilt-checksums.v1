@@ -26,7 +26,11 @@
 # build with an informational cargo:warning rather than a hard error, since
 # "no prebuilt exists yet for this crate version" isn't a release-process
 # bug, just the initial/pre-release state.
-x86_64-unknown-linux-gnu	tar.zst	726f86cb33f90a6bd356fb42956ca06d467bdb257e8689f7de891e11f49e35c9
-aarch64-unknown-linux-gnu	tar.zst	96b1c42a6123f30bedc6544402e9a1529c3572b5d430e72c2a153b2d31b18068
-aarch64-apple-darwin	tar.zst	bcbf707b1e832ba2ec081c144cd4b77f9c79db72678e90d291723578c26cb63b
-x86_64-pc-windows-msvc	tar.zst	b827262412b2a0e981e1bf6e88e9574562af047a3f9ec5c57820f13106732eb3
+x86_64-unknown-linux-gnu	tar.gz	2660f41a433df08fb8bcf4e6e3a335adecb2cdb82397f16da074807070ebf485
+x86_64-unknown-linux-gnu	tar.zst	d708a1fb585b6ebb9409bc782387f142ba1aa79d73282230de9c993f16f036dd
+aarch64-unknown-linux-gnu	tar.gz	35a0b53ea9eb151500b85abe6f205b9e74ccbb2df24dcf74a1533208083258bb
+aarch64-unknown-linux-gnu	tar.zst	f9d89e27242bfa00900fcdac65f0414868fa588b5db3cd22320684e509bef8f9
+aarch64-apple-darwin	tar.gz	e8f6c6f931a0b66ddd35848e6cab274cc8f409645e4d1bde3c64619d2ac47bed
+aarch64-apple-darwin	tar.zst	c851f709363ed49e5e239abd9139e68518e48f748d7efb4711eea809389fa4ee
+x86_64-pc-windows-msvc	tar.gz	07a1a0825cad5c1684d6a89187034af1f3b51e5e2ca706804d2dd4aa8a32cc4d
+x86_64-pc-windows-msvc	tar.zst	6534fae72b7136815c15892453ad8de903c618fc0b707bb8093ac6ce0ed6ee30
