@@ -57,15 +57,23 @@ jobs:
             cargo build --workspace -vv
 
       - name: Package and hash the bundle
+        # Two archive formats per target -- see build.rs's `ARCHIVE_FORMATS`
+        # doc comment for why: plain gzip (.tar.gz) is decodable by every
+        # `tar` in existence (including AlmaLinux 8's, which lacks zstd
+        # support), while .tar.zst stays as a smaller/faster option for
+        # hosts that do support it.
         shell: bash
         run: |
           set -eux
           VERSION="${GITHUB_REF_NAME#v}"
           TARGET="x86_64-unknown-linux-gnu"
           mkdir -p dist
+          tar -czf "dist/osquery-sys-${VERSION}-${TARGET}.tar.gz" -C pkg .
           tar --zstd -cf "dist/osquery-sys-${VERSION}-${TARGET}.tar.zst" -C pkg .
-          sha256sum "dist/osquery-sys-${VERSION}-${TARGET}.tar.zst" \
-            | awk '{print $1}' > "dist/osquery-sys-${VERSION}-${TARGET}.sha256"
+          for fmt in tar.gz tar.zst; do
+            sha256sum "dist/osquery-sys-${VERSION}-${TARGET}.${fmt}" \
+              | awk '{print $1}' > "dist/osquery-sys-${VERSION}-${TARGET}.${fmt}.sha256"
+          done
 
       - uses: actions/upload-artifact@v7
         with:
@@ -102,15 +110,19 @@ jobs:
             cargo build --workspace -vv
 
       - name: Package and hash the bundle
+        # See the x86_64 job's own comment above for why both formats.
         shell: bash
         run: |
           set -eux
           VERSION="${GITHUB_REF_NAME#v}"
           TARGET="aarch64-unknown-linux-gnu"
           mkdir -p dist
+          tar -czf "dist/osquery-sys-${VERSION}-${TARGET}.tar.gz" -C pkg .
           tar --zstd -cf "dist/osquery-sys-${VERSION}-${TARGET}.tar.zst" -C pkg .
-          sha256sum "dist/osquery-sys-${VERSION}-${TARGET}.tar.zst" \
-            | awk '{print $1}' > "dist/osquery-sys-${VERSION}-${TARGET}.sha256"
+          for fmt in tar.gz tar.zst; do
+            sha256sum "dist/osquery-sys-${VERSION}-${TARGET}.${fmt}" \
+              | awk '{print $1}' > "dist/osquery-sys-${VERSION}-${TARGET}.${fmt}.sha256"
+          done
 
       - uses: actions/upload-artifact@v7
         with:
@@ -146,15 +158,19 @@ jobs:
         run: cargo build --workspace -vv
 
       - name: Package and hash the bundle
+        # See the x86_64 Linux job's own comment for why both formats.
         shell: bash
         run: |
           set -eux
           VERSION="${GITHUB_REF_NAME#v}"
           TARGET="aarch64-apple-darwin"
           mkdir -p dist
+          tar -czf "dist/osquery-sys-${VERSION}-${TARGET}.tar.gz" -C pkg .
           tar --zstd -cf "dist/osquery-sys-${VERSION}-${TARGET}.tar.zst" -C pkg .
-          shasum -a 256 "dist/osquery-sys-${VERSION}-${TARGET}.tar.zst" \
-            | awk '{print $1}' > "dist/osquery-sys-${VERSION}-${TARGET}.sha256"
+          for fmt in tar.gz tar.zst; do
+            shasum -a 256 "dist/osquery-sys-${VERSION}-${TARGET}.${fmt}" \
+              | awk '{print $1}' > "dist/osquery-sys-${VERSION}-${TARGET}.${fmt}.sha256"
+          done
 
       - uses: actions/upload-artifact@v7
         with:
@@ -200,14 +216,18 @@ jobs:
         run: cargo build --workspace -vv
 
       - name: Package and hash the bundle
+        # See the x86_64 Linux job's own comment for why both formats.
         shell: pwsh
         run: |
           $version = $env:GITHUB_REF_NAME -replace '^v', ''
           $target = "x86_64-pc-windows-msvc"
           New-Item -ItemType Directory -Force -Path dist | Out-Null
+          tar -czf "dist/osquery-sys-$version-$target.tar.gz" -C pkg .
           tar --zstd -cf "dist/osquery-sys-$version-$target.tar.zst" -C pkg .
-          $hash = (Get-FileHash "dist/osquery-sys-$version-$target.tar.zst" -Algorithm SHA256).Hash.ToLower()
-          Set-Content -Path "dist/osquery-sys-$version-$target.sha256" -Value $hash -NoNewline
+          foreach ($fmt in "tar.gz", "tar.zst") {
+            $hash = (Get-FileHash "dist/osquery-sys-$version-$target.$fmt" -Algorithm SHA256).Hash.ToLower()
+            Set-Content -Path "dist/osquery-sys-$version-$target.$fmt.sha256" -Value $hash -NoNewline
+          }
 
       - uses: actions/upload-artifact@v7
         with:
@@ -244,13 +264,15 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           CHECKSUMS="osquery-sys/prebuilt-checksums.v1"
           for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu aarch64-apple-darwin x86_64-pc-windows-msvc; do
-            hash=$(cat "dist/osquery-sys-${VERSION}-${target}.sha256")
-            # Drop any existing line for this exact target (e.g. re-tagging
-            # the same version after fixing a release problem), then
-            # append the freshly computed one.
-            grep -v "^${target}	" "$CHECKSUMS" > "${CHECKSUMS}.tmp" || true
-            mv "${CHECKSUMS}.tmp" "$CHECKSUMS"
-            printf '%s\t%s\n' "$target" "$hash" >> "$CHECKSUMS"
+            for fmt in tar.gz tar.zst; do
+              hash=$(cat "dist/osquery-sys-${VERSION}-${target}.${fmt}.sha256")
+              # Drop any existing line for this exact target+format (e.g.
+              # re-tagging the same version after fixing a release
+              # problem), then append the freshly computed one.
+              grep -v "^${target}	${fmt}	" "$CHECKSUMS" > "${CHECKSUMS}.tmp" || true
+              mv "${CHECKSUMS}.tmp" "$CHECKSUMS"
+              printf '%s\t%s\t%s\n' "$target" "$fmt" "$hash" >> "$CHECKSUMS"
+            done
           done
           cat "$CHECKSUMS"
 
@@ -268,7 +290,7 @@ jobs:
         run: |
           gh release create "${{ github.ref_name }}" \
             --draft --generate-notes \
-            dist/osquery-sys-*.tar.zst
+            dist/osquery-sys-*.tar.gz dist/osquery-sys-*.tar.zst
 
       - name: Self-verify uploaded assets before publishing
         # Re-download each just-uploaded asset (gh CLI can read draft
@@ -284,14 +306,16 @@ jobs:
           set -eux
           VERSION="${GITHUB_REF_NAME#v}"
           rm -rf verify && mkdir verify
-          gh release download "${{ github.ref_name }}" --dir verify --pattern "*.tar.zst"
+          gh release download "${{ github.ref_name }}" --dir verify --pattern "*.tar.gz" --pattern "*.tar.zst"
           for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu aarch64-apple-darwin x86_64-pc-windows-msvc; do
-            expected=$(cat "dist/osquery-sys-${VERSION}-${target}.sha256")
-            actual=$(sha256sum "verify/osquery-sys-${VERSION}-${target}.tar.zst" | awk '{print $1}')
-            if [ "$expected" != "$actual" ]; then
-              echo "::error::Uploaded asset for ${target} does not match its computed hash (expected $expected, got $actual) -- NOT publishing the release."
-              exit 1
-            fi
+            for fmt in tar.gz tar.zst; do
+              expected=$(cat "dist/osquery-sys-${VERSION}-${target}.${fmt}.sha256")
+              actual=$(sha256sum "verify/osquery-sys-${VERSION}-${target}.${fmt}" | awk '{print $1}')
+              if [ "$expected" != "$actual" ]; then
+                echo "::error::Uploaded asset for ${target} (${fmt}) does not match its computed hash (expected $expected, got $actual) -- NOT publishing the release."
+                exit 1
+              fi
+            done
           done
 
       - name: Publish the release

@@ -87,6 +87,18 @@ const RELEASE_REPO: &str = "https://github.com/BeryJu/osquery-rs";
 /// `.github/workflows/release.yml` for how this file gets populated.
 const PREBUILT_CHECKSUMS: &str = include_str!("prebuilt-checksums.v1");
 
+/// Archive formats offered for each prebuilt bundle, in the order
+/// `download_and_verify_bundle` tries them. `tar.zst` comes first since
+/// it's the smaller/faster download and extracts fine on most hosts.
+/// `tar.gz` (plain gzip) is the fallback: it's decodable by literally every
+/// `tar` in existence, including the stock `tar` on AlmaLinux 8 and other
+/// older/minimal distros whose build of `tar` lacks zstd support entirely
+/// (`tar --zstd` on those hosts fails outright, e.g. "this does not look
+/// like a tar archive" or "Unrecognized archive format", breaking the
+/// whole prebuilt-download path for anyone on them) -- this loop only
+/// reaches it once `tar.zst` has failed to download or extract.
+const ARCHIVE_FORMATS: &[&str] = &["tar.zst", "tar.gz"];
+
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let shim_dir = manifest_dir.join("shim");
@@ -243,11 +255,10 @@ enum PrebuiltAttempt {
 /// |-----------------------------------------------|--------------------------------|
 /// | `OSQUERY_SYS_FORCE_SOURCE_BUILD` set          | never calls this function at all |
 /// | `TARGET` not in `PREBUILT_TARGETS`            | `FallBack`, informational       |
-/// | No checksum entry for this target yet         | `FallBack`, informational (not a hard error -- see below) |
-/// | Download network/HTTP failure                 | `FallBack`, loud warning         |
+/// | No checksum entry for this target in any `ARCHIVE_FORMATS` entry | `FallBack`, informational (not a hard error -- see below) |
+/// | Download/extraction failure for one format    | tries the next `ARCHIVE_FORMATS` entry; `FallBack` (loud warning) only once all are exhausted |
 /// | Checksum mismatch                              | hard `panic!`, no fallback       |
-/// | Extraction (`tar`) failure                     | `FallBack`, loud warning         |
-/// | Success                                        | `Used`                          |
+/// | Success (any format)                           | `Used`                          |
 ///
 /// The "no checksum entry yet" case deliberately falls back rather than
 /// hard-erroring (unlike a genuine mismatch): `prebuilt-checksums.v1` starts
@@ -368,22 +379,62 @@ fn resolve_prebuilt_compiler(manifest: &PrebuiltManifest) -> (PathBuf, Option<Pa
 }
 
 /// Downloads, verifies, and extracts the prebuilt bundle for `target` into
-/// `bundle_dir`. Returns `Err(reason)` for anything that should fall back
-/// to a from-source build (network/HTTP failure, extraction failure) --
-/// panics directly instead (no fallback) for a checksum mismatch, which is
-/// a real integrity concern rather than an environment condition. See
-/// `try_prebuilt`'s doc comment for the full reasoning on why these two
-/// failure classes are treated differently.
-fn download_and_verify_bundle(target: &str, version: &str, bundle_dir: &Path) -> Result<(), String> {
+/// `bundle_dir`, trying each of `ARCHIVE_FORMATS` in order until one
+/// actually succeeds (see that constant's doc comment for why `tar.gz` is
+/// tried before `tar.zst`). Returns `Err(reason)` once every format with a
+/// recorded checksum has failed to download or extract -- that's the
+/// signal to fall back to a from-source build. Panics directly instead (no
+/// fallback, no trying the next format) for a checksum mismatch on a
+/// format that *did* download, since that's a real integrity concern
+/// rather than an environment condition. See `try_prebuilt`'s doc comment
+/// for the full reasoning on why these failure classes are treated
+/// differently.
+fn download_and_verify_bundle(
+    target: &str,
+    version: &str,
+    bundle_dir: &Path,
+) -> Result<(), String> {
     let checksums = parse_prebuilt_checksums();
-    let Some(expected_hash) = checksums.get(target) else {
+    let Some(target_checksums) = checksums.get(target) else {
         return Err(format!(
             "no prebuilt bundle has been published yet for target {target} at version {version}"
         ));
     };
 
+    let mut attempted = false;
+    let mut failures = Vec::new();
+    for format in ARCHIVE_FORMATS {
+        let Some(expected_hash) = target_checksums.get(*format) else {
+            continue;
+        };
+        attempted = true;
+        match download_and_extract_one_format(target, version, format, expected_hash, bundle_dir) {
+            Ok(()) => return Ok(()),
+            Err(reason) => failures.push(reason),
+        }
+    }
+
+    if !attempted {
+        return Err(format!(
+            "no prebuilt bundle has been published yet for target {target} at version {version}"
+        ));
+    }
+    Err(failures.join("; then "))
+}
+
+/// Downloads, verifies, and extracts one specific `ARCHIVE_FORMATS` entry
+/// (e.g. `"tar.gz"`) of the prebuilt bundle for `target`. Split out of
+/// `download_and_verify_bundle` so that function can try each format in
+/// turn without duplicating the download/verify/extract sequence.
+fn download_and_extract_one_format(
+    target: &str,
+    version: &str,
+    format: &str,
+    expected_hash: &str,
+    bundle_dir: &Path,
+) -> Result<(), String> {
     let url = format!(
-        "{RELEASE_REPO}/releases/download/v{version}/osquery-sys-{version}-{target}.tar.zst"
+        "{RELEASE_REPO}/releases/download/v{version}/osquery-sys-{version}-{target}.{format}"
     );
     println!("cargo:warning=osquery-sys: downloading prebuilt bundle for {target} from {url}");
     let response = ureq::get(&url)
@@ -398,12 +449,12 @@ fn download_and_verify_bundle(target: &str, version: &str, bundle_dir: &Path) ->
         .map_err(|e| format!("failed to read downloaded bundle from {url}: {e}"))?;
 
     let actual_hash = sha256_hex(&bytes);
-    if &actual_hash != expected_hash {
+    if actual_hash != expected_hash {
         panic!(
-            "osquery-sys: downloaded prebuilt bundle for {target} does not match its recorded \
-             checksum (expected {expected_hash}, got {actual_hash}) -- refusing to use it. This \
-             could mean a corrupted download, or (much less likely) a compromised release \
-             asset; either way, verify {url} manually before proceeding. Set \
+            "osquery-sys: downloaded prebuilt bundle for {target} ({format}) does not match its \
+             recorded checksum (expected {expected_hash}, got {actual_hash}) -- refusing to use \
+             it. This could mean a corrupted download, or (much less likely) a compromised \
+             release asset; either way, verify {url} manually before proceeding. Set \
              OSQUERY_SYS_FORCE_SOURCE_BUILD=1 to build from source instead."
         );
     }
@@ -412,41 +463,52 @@ fn download_and_verify_bundle(target: &str, version: &str, bundle_dir: &Path) ->
         .map_err(|e| format!("failed to create {}: {e}", bundle_dir.display()))?;
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
-    let archive_path = out_dir.join(format!("osquery-sys-{version}-{target}.tar.zst"));
+    let archive_path = out_dir.join(format!("osquery-sys-{version}-{target}.{format}"));
     fs::write(&archive_path, &bytes)
         .map_err(|e| format!("failed to write downloaded bundle to {}: {e}", archive_path.display()))?;
 
     let mut tar = Command::new("tar");
-    tar.arg("--zstd")
-        .arg("-xf")
-        .arg(&archive_path)
-        .arg("-C")
-        .arg(bundle_dir);
+    match format {
+        "tar.gz" => {
+            tar.arg("-xzf").arg(&archive_path);
+        }
+        "tar.zst" => {
+            tar.arg("--zstd").arg("-xf").arg(&archive_path);
+        }
+        other => panic!("unknown entry in ARCHIVE_FORMATS: {other:?}"),
+    }
+    tar.arg("-C").arg(bundle_dir);
     let status = tar
         .status()
-        .map_err(|e| format!("failed to spawn tar to extract prebuilt bundle: {e}"))?;
+        .map_err(|e| format!("failed to spawn tar to extract prebuilt bundle ({format}): {e}"))?;
     let _ = fs::remove_file(&archive_path);
     if !status.success() {
-        return Err(format!("tar extraction of prebuilt bundle failed with {status}"));
+        return Err(format!(
+            "tar extraction of prebuilt bundle ({format}) failed with {status}"
+        ));
     }
 
     Ok(())
 }
 
 /// Parses the embedded `PREBUILT_CHECKSUMS` (`prebuilt-checksums.v1`) into a
-/// `target -> expected sha256 hex` map. Tab-separated, `#`-prefixed comment
-/// lines ignored -- see that file's own header for the full format
-/// rationale and how it gets populated.
-fn parse_prebuilt_checksums() -> HashMap<String, String> {
-    let mut map = HashMap::new();
+/// `target -> (archive format -> expected sha256 hex)` map. Tab-separated,
+/// `#`-prefixed comment lines ignored -- see that file's own header for the
+/// full format rationale and how it gets populated.
+fn parse_prebuilt_checksums() -> HashMap<String, HashMap<String, String>> {
+    let mut map: HashMap<String, HashMap<String, String>> = HashMap::new();
     for line in PREBUILT_CHECKSUMS.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
         let mut fields = line.split('\t');
-        if let (Some(target), Some(hash)) = (fields.next(), fields.next()) {
-            map.insert(target.to_string(), hash.to_string());
+        if let (Some(target), Some(format), Some(hash)) =
+            (fields.next(), fields.next(), fields.next())
+        {
+            map.entry(target.to_string())
+                .or_default()
+                .insert(format.to_string(), hash.to_string());
         }
     }
     map
