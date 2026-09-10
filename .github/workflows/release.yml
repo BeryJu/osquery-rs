@@ -144,7 +144,7 @@ jobs:
       - name: Install build prerequisites
         run: brew install ccache git git-lfs cmake python clang-format flex bison
 
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
 
       - name: Restore osquery source + native build cache
         uses: actions/cache@v6
@@ -202,7 +202,9 @@ jobs:
 
       - uses: ilammy/msvc-dev-cmd@v1
 
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          build-warnings: warn
 
       - name: Restore osquery source + native build cache
         uses: actions/cache@v6
