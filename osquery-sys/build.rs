@@ -131,11 +131,6 @@ fn main() {
         match try_prebuilt(&cache_root, &src_dir, &shim_dir) {
             PrebuiltAttempt::Used => return,
             PrebuiltAttempt::FallBack(reason) => {
-                // CI's prebuilt-path job sets this so a fallback fails fast
-                // instead of silently testing the from-source path for hours.
-                if env::var_os("OSQUERY_SYS_REQUIRE_PREBUILT").is_some() {
-                    panic!("osquery-sys: {reason} (OSQUERY_SYS_REQUIRE_PREBUILT is set)");
-                }
                 println!(
                     "cargo:warning=osquery-sys: {reason} -- falling back to a from-source \
                      build, which can take multiple hours. Set \

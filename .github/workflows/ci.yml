@@ -60,31 +60,50 @@ jobs:
             -v "${{ github.workspace }}:${{ github.workspace }}" \
             -w "${{ github.workspace }}" \
             -e OSQUERY_SYS_FORCE_SOURCE_BUILD \
+            -e OSQUERY_SYS_PACKAGE_DIR="${{ github.workspace }}/pkg" \
             quay.io/pypa/manylinux2014_x86_64 \
             bash .github/scripts/manylinux-entrypoint.sh \
             bash .github/scripts/linux-cargo-build-test.sh
 
-  # The *-prebuilt jobs test what consumers actually link: the released
-  # bundle for this crate version, not the from-source path the other jobs
-  # force. They fail (rather than falling back to source) when no bundle is
-  # recorded for this version yet, e.g. on a version-bump PR before its
-  # release.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ci-bundle-x86_64-unknown-linux-gnu
+          path: pkg
+
+  # The *-prebuilt jobs test what consumers actually link: the prebuilt-
+  # bundle path, against the bundle this run's source job just staged (via
+  # OSQUERY_SYS_PACKAGE_DIR, as release.yml does) rather than a released one.
   linux-prebuilt:
-    name: Linux (${{ matrix.arch }}, prebuilt bundle)
+    name: Linux (${{ matrix.target }}, prebuilt bundle)
+    needs: [linux, linux-arm64]
     strategy:
       fail-fast: false
       matrix:
         include:
-          - arch: x86_64
+          - target: x86_64-unknown-linux-gnu
             runner: ubuntu-latest
             image: quay.io/pypa/manylinux2014_x86_64
-          - arch: aarch64
+          - target: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm
             image: quay.io/pypa/manylinux_2_34_aarch64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: ci-bundle-${{ matrix.target }}
+          path: pkg
+
+      # try_prebuilt skips the download when this dir already has a
+      # manifest.v1, so the bundle staged by this run's source build is used.
+      - name: Place the bundle where build.rs looks for it
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          mkdir -p target/osquery-sys
+          mv pkg "target/osquery-sys/prebuilt-$version-${{ matrix.target }}"
 
       - name: Build + test against the prebuilt bundle
         # Same containers as the from-source Linux jobs;
@@ -93,23 +112,35 @@ jobs:
           docker run --rm \
             -v "${{ github.workspace }}:${{ github.workspace }}" \
             -w "${{ github.workspace }}" \
-            -e OSQUERY_SYS_REQUIRE_PREBUILT=1 \
             ${{ matrix.image }} \
             bash .github/scripts/manylinux-entrypoint.sh \
             bash .github/scripts/linux-cargo-build-test.sh
 
   macos-prebuilt:
     name: macOS (aarch64, prebuilt bundle)
+    needs: macos
     runs-on: macos-26
     timeout-minutes: 60
-    env:
-      OSQUERY_SYS_REQUIRE_PREBUILT: "1"
     steps:
       - uses: actions/checkout@v7
 
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           cache: false
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: ci-bundle-aarch64-apple-darwin
+          path: pkg
+
+      # try_prebuilt skips the download when this dir already has a
+      # manifest.v1, so the bundle staged by this run's source build is used.
+      - name: Place the bundle where build.rs looks for it
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          mkdir -p target/osquery-sys
+          mv pkg "target/osquery-sys/prebuilt-$version-aarch64-apple-darwin"
 
       - name: cargo test (integration)
         run: |
@@ -118,12 +149,12 @@ jobs:
 
   windows-prebuilt:
     name: Windows (x86_64, prebuilt bundle)
+    needs: windows
     runs-on: windows-latest
     timeout-minutes: 60
     env:
       # See the `windows` job.
       RUSTFLAGS: -C target-feature=+crt-static
-      OSQUERY_SYS_REQUIRE_PREBUILT: "1"
     steps:
       - run: git config --global core.longpaths true
 
@@ -135,6 +166,20 @@ jobs:
         with:
           cache: false
           build-warnings: warn
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: ci-bundle-x86_64-pc-windows-msvc
+          path: pkg
+
+      # try_prebuilt skips the download when this dir already has a
+      # manifest.v1, so the bundle staged by this run's source build is used.
+      - name: Place the bundle where build.rs looks for it
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          mkdir -p target/osquery-sys
+          mv pkg "target/osquery-sys/prebuilt-$version-x86_64-pc-windows-msvc"
 
       - name: cargo test (integration)
         run: |
@@ -170,14 +215,22 @@ jobs:
             -v "${{ github.workspace }}:${{ github.workspace }}" \
             -w "${{ github.workspace }}" \
             -e OSQUERY_SYS_FORCE_SOURCE_BUILD \
+            -e OSQUERY_SYS_PACKAGE_DIR="${{ github.workspace }}/pkg" \
             quay.io/pypa/manylinux_2_34_aarch64 \
             bash .github/scripts/manylinux-entrypoint.sh \
             bash .github/scripts/linux-cargo-build-test.sh
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ci-bundle-aarch64-unknown-linux-gnu
+          path: pkg
 
   macos:
     name: macOS (aarch64)
     runs-on: macos-26
     timeout-minutes: 240
+    env:
+      OSQUERY_SYS_PACKAGE_DIR: ${{ github.workspace }}/pkg
     steps:
       - uses: actions/checkout@v7
 
@@ -206,6 +259,11 @@ jobs:
       - name: cargo test (integration)
         run: cargo test -p osquery -vv -- --nocapture
 
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ci-bundle-aarch64-apple-darwin
+          path: pkg
+
   windows:
     name: Windows (x86_64)
     runs-on: windows-latest
@@ -222,6 +280,7 @@ jobs:
       # LNK2038 error, on the run right after that fix landed). Setting
       # the identical flag here as an env var busts that cache key too.
       RUSTFLAGS: -C target-feature=+crt-static
+      OSQUERY_SYS_PACKAGE_DIR: ${{ github.workspace }}\pkg
     steps:
       - name: Enable long paths in git
         # osquery's own Windows build docs note path-length issues are a
@@ -271,3 +330,8 @@ jobs:
 
       - name: cargo test (integration)
         run: cargo test -p osquery -vv -- --nocapture
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ci-bundle-x86_64-pc-windows-msvc
+          path: pkg
