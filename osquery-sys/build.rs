@@ -343,9 +343,10 @@ fn try_prebuilt(cache_root: &Path, src_dir: &Path, shim_dir: &Path) -> PrebuiltA
 /// path already resolves that toolchain via `OSQUERY_TOOLCHAIN_SYSROOT`
 /// (default `/usr/local/osquery-toolchain`), so re-resolve against that same
 /// locally-known location rather than trusting the manifest's recorded path.
-/// macOS/Windows compilers are already at portable, standard locations
-/// (Xcode's `/usr/bin/clang++`, MSVC's `cc`-auto-detected `cl.exe`), so the
-/// manifest's recorded path is used as-is there.
+/// macOS's compiler is at a portable, standard location (Xcode's
+/// `/usr/bin/clang++`), so the manifest's recorded path is used as-is
+/// there. On Windows the returned path is ignored by the compile steps,
+/// which let `cc` auto-detect `cl.exe` instead.
 fn resolve_prebuilt_compiler(manifest: &PrebuiltManifest) -> (PathBuf, Option<PathBuf>) {
     if !cfg!(target_os = "linux") {
         return (manifest.cxx_compiler.clone(), manifest.sysroot.clone());
@@ -1999,10 +2000,16 @@ fn compile_shim(
     let mut build = cc::Build::new();
     build
         .cpp(true)
-        .compiler(cxx_compiler)
         .file(shim_dir.join("shim.cpp"))
         .include(src_dir)
         .std("c++17");
+    if !cfg!(windows) {
+        // On Windows the recorded cl.exe path embeds the MSVC toolset
+        // version (VC/Tools/MSVC/<ver>/...), which goes stale whenever the
+        // machine's VS install updates; let `cc` auto-detect instead, same
+        // as compile_compat_stubs.
+        build.compiler(cxx_compiler);
+    }
 
     for define in defines {
         build.flag(define);
