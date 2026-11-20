@@ -136,11 +136,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Select a supported Xcode version
-        uses: maxim-lobanov/setup-xcode@v1
-        with:
-          xcode-version: "15.4"
-
       - name: Install build prerequisites
         run: brew install ccache git git-lfs cmake python clang-format flex bison
 
