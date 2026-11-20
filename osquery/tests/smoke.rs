@@ -63,6 +63,37 @@ fn select_1_end_to_end_with_no_socket() {
     );
 }
 
+// Regression: 0.2.5's x86_64 Linux link (libc++ linked selectively, without
+// cc's `-lc++`) crashed on these tables while users/SELECT 1 still worked.
+#[test]
+fn system_info_has_rows() {
+    let result = instance()
+        .query_row("SELECT * FROM system_info")
+        .expect("system_info should succeed");
+    assert!(!result.rows.is_empty(), "system_info returned no rows");
+}
+
+#[cfg(unix)]
+#[test]
+fn mounts_has_rows() {
+    let result = instance()
+        .query_row("SELECT * FROM mounts")
+        .expect("mounts should succeed");
+    assert!(!result.rows.is_empty(), "mounts returned no rows");
+}
+
+// Rows depend on the host/container (and root for disk_encryption), so only
+// assert the queries complete.
+#[cfg(unix)]
+#[test]
+fn block_devices_and_disk_encryption_no_crash() {
+    for table in ["block_devices", "disk_encryption"] {
+        instance()
+            .query_row(&format!("SELECT * FROM {table}"))
+            .unwrap_or_else(|e| panic!("{table} should succeed: {e}"));
+    }
+}
+
 fn list_em_files(dir: &Path) -> std::collections::HashSet<String> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Default::default();

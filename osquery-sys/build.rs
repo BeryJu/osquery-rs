@@ -851,6 +851,26 @@ fn ensure_osquery_source(dest: &Path) -> bool {
 fn apply_local_patches(src_dir: &Path) {
     patch_boost_mpl_enum_constexpr_conversion(src_dir);
     patch_boost_numeric_conversion_mixture_enums(src_dir);
+    patch_drop_cf_protection(src_dir);
+}
+
+/// osquery 5.24 added `-fcf-protection=full` on x86_64 Linux. Our embedded
+/// x86_64 Linux build crashed (system_info/mounts: corrupt return addresses,
+/// bad_alloc) after it landed, and CET can never be enabled for the final
+/// binary anyway: the linker only marks it CET-compatible if *every* object
+/// is, and Rust's aren't.
+fn patch_drop_cf_protection(src_dir: &Path) {
+    let path = src_dir.join("cmake/flags.cmake");
+    let contents = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
+    let patched = contents.replace(
+        "list(APPEND linux_common_compile_options -fcf-protection=full)",
+        "",
+    );
+    if patched != contents {
+        fs::write(&path, patched)
+            .unwrap_or_else(|e| panic!("failed to write {}: {e}", path.display()));
+    }
 }
 
 /// Boost.MPL's integral_wrapper.hpp computes value+1/value-1 for every
@@ -1393,6 +1413,10 @@ enum LinkItem {
 /// here comes from this one crate's build script, so the order we computed
 /// while parsing osquery's own link.txt is preserved exactly.
 fn emit_link_items(items: &[LinkItem]) {
+    // Every prebuilt-bundle archive shares one lib/ dir; print it once, not
+    // once per archive. Dropping repeats can't change resolution, since the
+    // linker searches -L dirs in first-seen order.
+    let mut searched = HashSet::new();
     for item in items {
         match item {
             LinkItem::StaticLib {
@@ -1400,7 +1424,9 @@ fn emit_link_items(items: &[LinkItem]) {
                 name,
                 whole_archive,
             } => {
-                println!("cargo:rustc-link-search=native={}", dir.display());
+                if searched.insert(dir) {
+                    println!("cargo:rustc-link-search=native={}", dir.display());
+                }
                 if *whole_archive {
                     println!("cargo:rustc-link-lib=static:+whole-archive={name}");
                 } else {
@@ -2019,11 +2045,15 @@ fn compile_shim(
     }
 
     if cfg!(target_os = "linux") {
-        // libc++ is already emitted explicitly (the toolchain's libc++.a, see
-        // append_linux_default_linker_items); a second, plain `c++` from cc
-        // is a rustc hard error once force_whole_archive_workaround makes
-        // ours `static:+whole-archive=c++` on aarch64.
-        build.cpp_link_stdlib(None);
+        // aarch64 only: there force_whole_archive_workaround makes the
+        // explicit libc++.a (see append_linux_default_linker_items)
+        // `static:+whole-archive=c++`, and a second, plain `c++` from cc is a
+        // rustc hard error. Elsewhere libc++.a is linked selectively, so
+        // keep cc's `-lc++` (0.2.5 dropped it on x86_64 too and table
+        // queries like system_info/mounts crashed at runtime).
+        if env::var("TARGET").as_deref() == Ok("aarch64-unknown-linux-gnu") {
+            build.cpp_link_stdlib(None);
+        }
         build.flag("-stdlib=libc++");
         if let Some(sysroot) = sysroot {
             build.flag(format!("--sysroot={}", sysroot.display()));

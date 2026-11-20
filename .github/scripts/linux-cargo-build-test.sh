@@ -21,4 +21,17 @@ trap 'kill "$HEARTBEAT_PID" 2>/dev/null || true' EXIT
 # KB per line for this project, past what GitHub Actions' log storage keeps
 # intact. `fold` keeps lines short; `set -o pipefail` above keeps cargo's
 # own exit code (not fold's) governing `set -e`.
-cargo test -p osquery -vv -- --nocapture 2>&1 | fold -w 2000
+status=0
+cargo test -p osquery -vv -- --nocapture 2>&1 | fold -w 2000 || status=$?
+
+# A native crash kills the whole (parallel) test binary with no hint of which
+# test or where; rerun each binary single-threaded under gdb for a backtrace.
+if [ "$status" -ne 0 ]; then
+  command -v gdb >/dev/null || yum install -y gdb
+  for bin in $(cargo test -p osquery --no-run --message-format=json 2>/dev/null \
+      | sed -n 's/.*"executable":"\([^"]*\)".*/\1/p'); do
+    gdb -q -batch -ex run -ex bt -ex 'x/4i $pc' \
+      --args "$bin" --test-threads=1 --nocapture || true
+  done
+  exit "$status"
+fi
