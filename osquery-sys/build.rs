@@ -1393,6 +1393,10 @@ enum LinkItem {
 /// here comes from this one crate's build script, so the order we computed
 /// while parsing osquery's own link.txt is preserved exactly.
 fn emit_link_items(items: &[LinkItem]) {
+    // Every prebuilt-bundle archive shares one lib/ dir; print it once, not
+    // once per archive. Dropping repeats can't change resolution, since the
+    // linker searches -L dirs in first-seen order.
+    let mut searched = HashSet::new();
     for item in items {
         match item {
             LinkItem::StaticLib {
@@ -1400,7 +1404,9 @@ fn emit_link_items(items: &[LinkItem]) {
                 name,
                 whole_archive,
             } => {
-                println!("cargo:rustc-link-search=native={}", dir.display());
+                if searched.insert(dir) {
+                    println!("cargo:rustc-link-search=native={}", dir.display());
+                }
                 if *whole_archive {
                     println!("cargo:rustc-link-lib=static:+whole-archive={name}");
                 } else {
