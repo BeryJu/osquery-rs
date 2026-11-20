@@ -64,6 +64,84 @@ jobs:
             bash .github/scripts/manylinux-entrypoint.sh \
             bash .github/scripts/linux-cargo-build-test.sh
 
+  # The *-prebuilt jobs test what consumers actually link: the released
+  # bundle for this crate version, not the from-source path the other jobs
+  # force. They fail (rather than falling back to source) when no bundle is
+  # recorded for this version yet, e.g. on a version-bump PR before its
+  # release.
+  linux-prebuilt:
+    name: Linux (${{ matrix.arch }}, prebuilt bundle)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+            image: quay.io/pypa/manylinux2014_x86_64
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            image: quay.io/pypa/manylinux_2_34_aarch64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build + test against the prebuilt bundle
+        # Same containers as the from-source Linux jobs;
+        # OSQUERY_SYS_FORCE_SOURCE_BUILD is deliberately not passed through.
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:${{ github.workspace }}" \
+            -w "${{ github.workspace }}" \
+            -e OSQUERY_SYS_REQUIRE_PREBUILT=1 \
+            ${{ matrix.image }} \
+            bash .github/scripts/manylinux-entrypoint.sh \
+            bash .github/scripts/linux-cargo-build-test.sh
+
+  macos-prebuilt:
+    name: macOS (aarch64, prebuilt bundle)
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      OSQUERY_SYS_REQUIRE_PREBUILT: "1"
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          cache: false
+
+      - name: cargo test (integration)
+        run: |
+          unset OSQUERY_SYS_FORCE_SOURCE_BUILD
+          cargo test -p osquery -vv -- --nocapture
+
+  windows-prebuilt:
+    name: Windows (x86_64, prebuilt bundle)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      # See the `windows` job.
+      RUSTFLAGS: -C target-feature=+crt-static
+      OSQUERY_SYS_REQUIRE_PREBUILT: "1"
+    steps:
+      - run: git config --global core.longpaths true
+
+      - uses: actions/checkout@v7
+
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          cache: false
+          build-warnings: warn
+
+      - name: cargo test (integration)
+        run: |
+          Remove-Item Env:OSQUERY_SYS_FORCE_SOURCE_BUILD
+          cargo test -p osquery -vv -- --nocapture
+        shell: pwsh
+
   linux-arm64:
     name: Linux (aarch64)
     # GitHub's own native arm64-hosted Linux runner (GA for both public and

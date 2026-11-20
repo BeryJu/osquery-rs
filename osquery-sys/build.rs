@@ -131,6 +131,11 @@ fn main() {
         match try_prebuilt(&cache_root, &src_dir, &shim_dir) {
             PrebuiltAttempt::Used => return,
             PrebuiltAttempt::FallBack(reason) => {
+                // CI's prebuilt-path job sets this so a fallback fails fast
+                // instead of silently testing the from-source path for hours.
+                if env::var_os("OSQUERY_SYS_REQUIRE_PREBUILT").is_some() {
+                    panic!("osquery-sys: {reason} (OSQUERY_SYS_REQUIRE_PREBUILT is set)");
+                }
                 println!(
                     "cargo:warning=osquery-sys: {reason} -- falling back to a from-source \
                      build, which can take multiple hours. Set \
@@ -2019,11 +2024,15 @@ fn compile_shim(
     }
 
     if cfg!(target_os = "linux") {
-        // libc++ is already emitted explicitly (the toolchain's libc++.a, see
-        // append_linux_default_linker_items); a second, plain `c++` from cc
-        // is a rustc hard error once force_whole_archive_workaround makes
-        // ours `static:+whole-archive=c++` on aarch64.
-        build.cpp_link_stdlib(None);
+        // aarch64 only: there force_whole_archive_workaround makes the
+        // explicit libc++.a (see append_linux_default_linker_items)
+        // `static:+whole-archive=c++`, and a second, plain `c++` from cc is a
+        // rustc hard error. Elsewhere libc++.a is linked selectively, so
+        // keep cc's `-lc++` (0.2.5 dropped it on x86_64 too and table
+        // queries like system_info/mounts crashed at runtime).
+        if env::var("TARGET").as_deref() == Ok("aarch64-unknown-linux-gnu") {
+            build.cpp_link_stdlib(None);
+        }
         build.flag("-stdlib=libc++");
         if let Some(sysroot) = sysroot {
             build.flag(format!("--sysroot={}", sysroot.display()));
