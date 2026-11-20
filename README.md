@@ -115,11 +115,9 @@ then builds it from source. That build:
 - compiles dozens of third-party dependencies plus osquery's own large C++
   codebase, and can take a long time (potentially hours) on first build;
 - is **only validated end-to-end in this repo via Linux** (see
-  `docker/build.Dockerfile` and below) -- osquery's own docs state its
-  macOS build is broken on Xcode SDK >= 16.3, and this repo was
-  bootstrapped on a host with only newer Xcode versions available, so the
-  macOS path in `osquery-sys/build.rs` is written but unverified locally
-  (it *is* exercised by CI -- see `.github/workflows/ci.yml`, which always
+  `docker/build.Dockerfile` and below) -- the macOS path in
+  `osquery-sys/build.rs` (Xcode 16+, per osquery's build docs) is
+  unverified locally (it *is* exercised by CI -- see `.github/workflows/ci.yml`, which always
   forces this path via `OSQUERY_SYS_FORCE_SOURCE_BUILD=1` specifically so
   it keeps testing it once real prebuilt releases exist).
 
