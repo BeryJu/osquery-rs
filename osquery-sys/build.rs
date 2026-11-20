@@ -2019,6 +2019,11 @@ fn compile_shim(
     }
 
     if cfg!(target_os = "linux") {
+        // libc++ is already emitted explicitly (the toolchain's libc++.a, see
+        // append_linux_default_linker_items); a second, plain `c++` from cc
+        // is a rustc hard error once force_whole_archive_workaround makes
+        // ours `static:+whole-archive=c++` on aarch64.
+        build.cpp_link_stdlib(None);
         build.flag("-stdlib=libc++");
         if let Some(sysroot) = sysroot {
             build.flag(format!("--sysroot={}", sysroot.display()));
