@@ -27,9 +27,9 @@ jobs:
         with:
           # build.rs clones osquery's pinned tag itself (no git submodule)
           # and caches both the cloned source and the native build under
-          # target/osquery-sys/{src,build}-<tag>/ -- see cargo_target_dir()
+          # target/debug/osquery-sys/{src,build}-<tag>/ -- see cargo_target_dir()
           # in osquery-sys/build.rs.
-          path: target/osquery-sys
+          path: target/debug/osquery-sys
           key: osquery-sys-linux-${{ hashFiles('osquery-sys/build.rs') }}
 
       - name: Build + test inside manylinux2014 (glibc 2.17 floor)
@@ -102,8 +102,8 @@ jobs:
         shell: bash
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          mkdir -p target/osquery-sys
-          mv pkg "target/osquery-sys/prebuilt-$version-${{ matrix.target }}"
+          mkdir -p target/debug/osquery-sys
+          mv pkg "target/debug/osquery-sys/prebuilt-$version-${{ matrix.target }}"
 
       - name: Build + test against the prebuilt bundle
         # Same containers as the from-source Linux jobs;
@@ -139,8 +139,8 @@ jobs:
         shell: bash
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          mkdir -p target/osquery-sys
-          mv pkg "target/osquery-sys/prebuilt-$version-aarch64-apple-darwin"
+          mkdir -p target/debug/osquery-sys
+          mv pkg "target/debug/osquery-sys/prebuilt-$version-aarch64-apple-darwin"
 
       - name: cargo test (integration)
         run: |
@@ -178,8 +178,8 @@ jobs:
         shell: bash
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          mkdir -p target/osquery-sys
-          mv pkg "target/osquery-sys/prebuilt-$version-x86_64-pc-windows-msvc"
+          mkdir -p target/debug/osquery-sys
+          mv pkg "target/debug/osquery-sys/prebuilt-$version-x86_64-pc-windows-msvc"
 
       - name: cargo test (integration)
         run: |
@@ -201,7 +201,7 @@ jobs:
       - name: Restore osquery source + native build cache
         uses: actions/cache@v6
         with:
-          path: target/osquery-sys
+          path: target/debug/osquery-sys
           key: osquery-sys-linux-arm64-${{ hashFiles('osquery-sys/build.rs') }}
 
       - name: Build + test inside manylinux_2_34 (glibc 2.34 floor)
@@ -244,7 +244,7 @@ jobs:
       - name: Restore osquery source + native build cache
         uses: actions/cache@v6
         with:
-          path: target/osquery-sys
+          path: target/debug/osquery-sys
           key: osquery-sys-macos-${{ hashFiles('osquery-sys/build.rs') }}
 
       - name: cargo build
@@ -316,7 +316,7 @@ jobs:
       - name: Restore osquery source + native build cache
         uses: actions/cache@v6
         with:
-          path: target/osquery-sys
+          path: target/debug/osquery-sys
           key: osquery-sys-windows-${{ hashFiles('osquery-sys/build.rs') }}
 
       - name: cargo build
