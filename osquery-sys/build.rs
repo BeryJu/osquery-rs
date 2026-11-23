@@ -55,7 +55,7 @@ use std::process::Command;
 /// pin to keep in sync with anymore). Changing it changes the default
 /// source/build cache paths too (see `main`), so a version bump naturally
 /// gets a fresh build rather than reusing a stale cache.
-const OSQUERY_TAG: &str = "5.24.1";
+const OSQUERY_TAG: &str = "5.23.1";
 const OSQUERY_REPO_URL: &str = "https://github.com/osquery/osquery.git";
 
 /// Target triples this crate ships a prebuilt bundle for -- exactly the
@@ -851,26 +851,6 @@ fn ensure_osquery_source(dest: &Path) -> bool {
 fn apply_local_patches(src_dir: &Path) {
     patch_boost_mpl_enum_constexpr_conversion(src_dir);
     patch_boost_numeric_conversion_mixture_enums(src_dir);
-    patch_drop_cf_protection(src_dir);
-}
-
-/// osquery 5.24 added `-fcf-protection=full` on x86_64 Linux. Our embedded
-/// x86_64 Linux build crashed (system_info/mounts: corrupt return addresses,
-/// bad_alloc) after it landed, and CET can never be enabled for the final
-/// binary anyway: the linker only marks it CET-compatible if *every* object
-/// is, and Rust's aren't.
-fn patch_drop_cf_protection(src_dir: &Path) {
-    let path = src_dir.join("cmake/flags.cmake");
-    let contents = fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
-    let patched = contents.replace(
-        "list(APPEND linux_common_compile_options -fcf-protection=full)",
-        "",
-    );
-    if patched != contents {
-        fs::write(&path, patched)
-            .unwrap_or_else(|e| panic!("failed to write {}: {e}", path.display()));
-    }
 }
 
 /// Boost.MPL's integral_wrapper.hpp computes value+1/value-1 for every
