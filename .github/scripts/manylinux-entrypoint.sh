@@ -82,6 +82,6 @@ export PATH="/usr/local/cargo/bin:$PATH"
 
 # The container runs as root; anything it writes under the bind-mounted
 # workspace must stay readable by the runner's own user afterward.
-trap 'chmod -R a+rX target/osquery-sys pkg 2>/dev/null || true' EXIT
+trap 'chmod -R a+rX target/debug/osquery-sys pkg 2>/dev/null || true' EXIT
 
 "$@"

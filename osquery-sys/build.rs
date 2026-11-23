@@ -55,7 +55,7 @@ use std::process::Command;
 /// pin to keep in sync with anymore). Changing it changes the default
 /// source/build cache paths too (see `main`), so a version bump naturally
 /// gets a fresh build rather than reusing a stale cache.
-const OSQUERY_TAG: &str = "5.24.1";
+const OSQUERY_TAG: &str = "5.23.1";
 const OSQUERY_REPO_URL: &str = "https://github.com/osquery/osquery.git";
 
 /// Target triples this crate ships a prebuilt bundle for -- exactly the
@@ -1393,6 +1393,10 @@ enum LinkItem {
 /// here comes from this one crate's build script, so the order we computed
 /// while parsing osquery's own link.txt is preserved exactly.
 fn emit_link_items(items: &[LinkItem]) {
+    // Every prebuilt-bundle archive shares one lib/ dir; print it once, not
+    // once per archive. Dropping repeats can't change resolution, since the
+    // linker searches -L dirs in first-seen order.
+    let mut searched = HashSet::new();
     for item in items {
         match item {
             LinkItem::StaticLib {
@@ -1400,7 +1404,9 @@ fn emit_link_items(items: &[LinkItem]) {
                 name,
                 whole_archive,
             } => {
-                println!("cargo:rustc-link-search=native={}", dir.display());
+                if searched.insert(dir) {
+                    println!("cargo:rustc-link-search=native={}", dir.display());
+                }
                 if *whole_archive {
                     println!("cargo:rustc-link-lib=static:+whole-archive={name}");
                 } else {
@@ -2019,11 +2025,15 @@ fn compile_shim(
     }
 
     if cfg!(target_os = "linux") {
-        // libc++ is already emitted explicitly (the toolchain's libc++.a, see
-        // append_linux_default_linker_items); a second, plain `c++` from cc
-        // is a rustc hard error once force_whole_archive_workaround makes
-        // ours `static:+whole-archive=c++` on aarch64.
-        build.cpp_link_stdlib(None);
+        // aarch64 only: there force_whole_archive_workaround makes the
+        // explicit libc++.a (see append_linux_default_linker_items)
+        // `static:+whole-archive=c++`, and a second, plain `c++` from cc is a
+        // rustc hard error. Elsewhere libc++.a is linked selectively, so
+        // keep cc's `-lc++` (0.2.5 dropped it on x86_64 too and table
+        // queries like system_info/mounts crashed at runtime).
+        if env::var("TARGET").as_deref() == Ok("aarch64-unknown-linux-gnu") {
+            build.cpp_link_stdlib(None);
+        }
         build.flag("-stdlib=libc++");
         if let Some(sysroot) = sysroot {
             build.flag(format!("--sysroot={}", sysroot.display()));
