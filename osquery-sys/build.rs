@@ -55,7 +55,7 @@ use std::process::Command;
 /// pin to keep in sync with anymore). Changing it changes the default
 /// source/build cache paths too (see `main`), so a version bump naturally
 /// gets a fresh build rather than reusing a stale cache.
-const OSQUERY_TAG: &str = "5.23.1";
+const OSQUERY_TAG: &str = "5.24.1";
 const OSQUERY_REPO_URL: &str = "https://github.com/osquery/osquery.git";
 
 /// Target triples this crate ships a prebuilt bundle for -- exactly the
